@@ -25,9 +25,11 @@ jobs:
   package:
     needs: quality
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success')
+      success() && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success')
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -35,12 +37,19 @@ jobs:
           - os: ubuntu-latest
             command: npm run build:linux
             artifact: linux
+            files: |
+              release/*.AppImage
+              release/*.deb
           - os: windows-latest
             command: npm run build:windows
             artifact: windows
+            files: release/*.exe
           - os: macos-latest
             command: npm run build:macos
             artifact: macos
+            files: |
+              release/*.zip
+              release/*.dmg
     runs-on: ${{ matrix.os }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -55,5 +64,39 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: lasercut-studio-${{ matrix.artifact }}-${{ github.run_number }}
-          path: release/*
+          path: ${{ matrix.files }}
           if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: build-${{ github.run_number }}
+      RELEASE_TARGET: ${{ github.event.deployment.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lasercut-studio-*-${{ github.run_number }}
+          path: release-assets
+          merge-multiple: true
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 6
+          find release-assets -maxdepth 1 -type f -print
+      - name: Publish GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_TARGET" \
+            --title "LaserCut Studio $VERSION (build $GITHUB_RUN_NUMBER)" \
+            --generate-notes

@@ -30,9 +30,11 @@ build) runs in GitHub Actions for pushes and pull requests.
 npm run build:desktop
 ```
 
-Builds are written to `release/`. GitHub Actions creates a standalone and an
-installer artifact for Linux (AppImage/deb), Windows (portable/NSIS), and macOS
-(zip/dmg) on pushes to `main`, manual runs, and successful deployment events.
+Builds are written to `release/`. After the quality gate succeeds, GitHub
+Actions creates a standalone and an installer for Linux (AppImage/deb), Windows
+(portable/NSIS), and macOS (zip/dmg) on pushes to `main`, manual runs, and
+successful deployment events. Once all six files exist, they are published
+together as a downloadable GitHub Release tagged with the workflow build number.
 
 ## Roadmap
 
