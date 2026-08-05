@@ -1,14 +1,17 @@
-name: Code quality
+name: Quality and desktop packages
 
 on:
   push:
   pull_request:
+  deployment_status:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   quality:
+    if: github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,3 +21,39 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run quality
+
+  package:
+    needs: quality
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            command: npm run build:linux
+            artifact: linux
+          - os: windows-latest
+            command: npm run build:windows
+            artifact: windows
+          - os: macos-latest
+            command: npm run build:macos
+            artifact: macos
+    runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: ${{ matrix.command }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lasercut-studio-${{ matrix.artifact }}-${{ github.run_number }}
+          path: release/*
+          if-no-files-found: error
