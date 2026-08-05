@@ -22,7 +22,7 @@ jobs:
       - run: npm ci
       - run: npm run quality
 
-  package:
+  prepare-release:
     needs: quality
     if: >-
       success() && (
@@ -30,46 +30,6 @@ jobs:
         (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
         (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success')
       )
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            command: npm run build:linux
-            artifact: linux
-            files: |
-              release/*.AppImage
-              release/*.deb
-          - os: windows-latest
-            command: npm run build:windows
-            artifact: windows
-            files: release/*.exe
-          - os: macos-latest
-            command: npm run build:macos
-            artifact: macos
-            files: |
-              release/*.zip
-              release/*.dmg
-    runs-on: ${{ matrix.os }}
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: ${{ matrix.command }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: lasercut-studio-${{ matrix.artifact }}-${{ github.run_number }}
-          path: ${{ matrix.files }}
-          if-no-files-found: error
-          retention-days: 30
-
-  release:
-    needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -79,24 +39,84 @@ jobs:
       RELEASE_TARGET: ${{ github.event.deployment.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: lasercut-studio-*-${{ github.run_number }}
-          path: release-assets
-          merge-multiple: true
-      - name: Verify release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 6
-          find release-assets -maxdepth 1 -type f -print
-      - name: Publish GitHub release
+      - name: Create draft release
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./package.json').version")"
-          gh release create "$RELEASE_TAG" release-assets/* \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$RELEASE_TARGET" \
             --title "LaserCut Studio $VERSION (build $GITHUB_RUN_NUMBER)" \
-            --generate-notes
+            --generate-notes \
+            --draft
+
+  package:
+    needs: prepare-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            command: npm run build:linux
+            artifact: linux
+            files: release/*.AppImage release/*.deb
+          - os: windows-latest
+            command: npm run build:windows
+            artifact: windows
+            files: release/*.exe
+          - os: macos-latest
+            command: npm run build:macos
+            artifact: macos
+            files: release/*.zip release/*.dmg
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: build-${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: ${{ matrix.command }}
+      - name: Upload ${{ matrix.artifact }} release files
+        shell: bash
+        run: >-
+          gh release upload "$RELEASE_TAG" ${{ matrix.files }}
+          --repo "$GITHUB_REPOSITORY"
+          --clobber
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: build-${{ github.run_number }}
+    steps:
+      - name: Verify and publish GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET_COUNT="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
+          test "$ASSET_COUNT" -eq 6
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  cleanup-failed-release:
+    needs: [prepare-release, package]
+    if: always() && needs.prepare-release.result == 'success' && needs.package.result != 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: build-${{ github.run_number }}
+    steps:
+      - name: Remove incomplete draft release
+        run: gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
