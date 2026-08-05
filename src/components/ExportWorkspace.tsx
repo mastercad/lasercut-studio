@@ -1,0 +1,494 @@
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { ArrowDown, ArrowUp, Download, Eye, X } from 'lucide-react'
+import {
+  getExportWorkerClient,
+  type ExportAnalysis,
+  type ExportWorkerPayload,
+} from '../model/exportWorkerClient'
+import { useEditor } from '../store/editor'
+
+export function ExportWorkspace() {
+  const panels = useEditor((state) => state.panels)
+  const materials = useEditor((state) => state.materials)
+  const legacyLayers = useEditor((state) => state.exportLayers)
+  const profiles = useEditor((state) => state.processingProfiles)
+  const recipes = useEditor((state) => state.processingRecipes)
+  const presets = useEditor((state) => state.laserPresets)
+  const lasers = useEditor((state) => state.laserCutters)
+  const activeLaserId = useEditor((state) => state.activeLaserId)
+  const groups = useEditor((state) => state.groups)
+  const laserTexts = useEditor((state) => state.laserTexts)
+  const selectedGroupId = useEditor((state) => state.selectedGroupId)
+  const moveProfile = useEditor((state) => state.moveProcessingProfile)
+  const [exporting, setExporting] = useState(false)
+  const [analysis, setAnalysis] = useState<ExportAnalysis | null>(null)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [previewMaterialId, setPreviewMaterialId] = useState<string | null>(
+    null,
+  )
+  const [previewSvg, setPreviewSvg] = useState<string | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const workerRef = useRef(getExportWorkerClient())
+  const [exportGroupId, setExportGroupId] = useState(() =>
+    selectedGroupId && groups.some((group) => group.id === selectedGroupId)
+      ? selectedGroupId
+      : 'all',
+  )
+  const exportGroup = groups.find((group) => group.id === exportGroupId)
+  const visiblePanels = useMemo(
+    () =>
+      panels.filter(
+        (panel) =>
+          panel.visible !== false &&
+          !groups.some(
+            (group) =>
+              group.visible === false && group.panelIds.includes(panel.id),
+          ),
+      ),
+    [panels, groups],
+  )
+  const scopedPanels = useMemo(
+    () =>
+      exportGroup
+        ? visiblePanels.filter((panel) =>
+            exportGroup.panelIds.includes(panel.id),
+          )
+        : visiblePanels,
+    [exportGroup, visiblePanels],
+  )
+  const usedMaterials = useMemo(
+    () =>
+      materials.filter((material) =>
+        scopedPanels.some(
+          (panel) => !panel.hidden && panel.materialId === material.id,
+        ),
+      ),
+    [materials, scopedPanels],
+  )
+  const activeLaser =
+    lasers.find((laser) => laser.id === activeLaserId) ?? lasers[0]
+  const workerPayload = useMemo<ExportWorkerPayload | null>(
+    () =>
+      activeLaser
+        ? {
+            materials: usedMaterials,
+            panels: scopedPanels,
+            profiles,
+            recipes,
+            presets,
+            laser: activeLaser,
+            groups,
+          }
+        : null,
+    [
+      usedMaterials,
+      scopedPanels,
+      profiles,
+      recipes,
+      presets,
+      activeLaser,
+      groups,
+    ],
+  )
+  useEffect(() => {
+    const worker = workerRef.current
+    if (!worker || !workerPayload) {
+      setAnalysis({ jobs: [], cache: { hits: 0, misses: 0 } })
+      return
+    }
+    let current = true
+    setAnalysis(null)
+    setAnalysisError(null)
+    void worker
+      .analyze(workerPayload)
+      .then((result) => {
+        if (current) setAnalysis(result)
+      })
+      .catch((error) => {
+        if (current)
+          setAnalysisError(
+            error instanceof Error ? error.message : String(error),
+          )
+      })
+    return () => {
+      current = false
+    }
+  }, [workerPayload])
+  const jobs = analysis?.jobs ?? []
+  const previewMaterial = usedMaterials.find(
+    (material) => material.id === previewMaterialId,
+  )
+  useEffect(() => {
+    const worker = workerRef.current
+    if (!worker || !workerPayload || !previewMaterialId) {
+      setPreviewSvg(null)
+      return
+    }
+    let current = true
+    setPreviewSvg(null)
+    setPreviewError(null)
+    void worker
+      .preview(workerPayload, previewMaterialId)
+      .then((svg) => {
+        if (current) setPreviewSvg(svg.replace(/^<\?xml[^>]*>/, ''))
+      })
+      .catch((error) => {
+        if (current)
+          setPreviewError(
+            error instanceof Error ? error.message : String(error),
+          )
+      })
+    return () => {
+      current = false
+    }
+  }, [workerPayload, previewMaterialId])
+  const download = async () => {
+    if (!workerPayload || !workerRef.current) return
+    setExporting(true)
+    try {
+      const buffer = await workerRef.current.package(
+        workerPayload,
+        legacyLayers,
+        laserTexts.filter((text) =>
+          scopedPanels.some((panel) => panel.id === text.panelId),
+        ),
+      )
+      const blob = new Blob([buffer], { type: 'application/zip' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `lasercut-export-${new Date().toISOString().slice(0, 10)}.zip`
+      link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setExporting(false)
+    }
+  }
+  const totalSteps = jobs.reduce((sum, job) => sum + job.steps.length, 0)
+  const missingRecipes = jobs.flatMap((job) =>
+    job.steps
+      .filter((step) => !step.configured)
+      .map((step) => ({ material: job.material, step })),
+  )
+  return (
+    <div className="export-workspace profiled-export">
+      <header className="export-heading">
+        <div>
+          <h2>Fertigung</h2>
+          <p>
+            Prüfe Bearbeitungsreihenfolge, Maschinenwerte und Vorschau, bevor du
+            das LightBurn-Paket herunterlädst.
+          </p>
+        </div>
+        <div>
+          <button
+            onClick={() => setPreviewMaterialId(usedMaterials[0]?.id ?? null)}
+            disabled={!analysis || !usedMaterials.length}
+          >
+            <Eye /> Vorschau prüfen
+          </button>
+          <button
+            className="download-package"
+            disabled={
+              !analysis ||
+              exporting ||
+              !usedMaterials.length ||
+              !totalSteps ||
+              missingRecipes.length > 0
+            }
+            title={
+              missingRecipes.length
+                ? `${missingRecipes.length} Laserzuordnung(en) müssen nachgepflegt werden`
+                : undefined
+            }
+            onClick={download}
+          >
+            <Download />
+            {exporting
+              ? 'Exportpaket wird erstellt…'
+              : analysis
+                ? missingRecipes.length
+                  ? 'Laserzuordnungen nachpflegen'
+                  : 'Exportpaket herunterladen'
+                : 'Bearbeitung wird analysiert…'}
+          </button>
+        </div>
+      </header>
+      <div className="export-scope">
+        <label>
+          <span>Exportumfang</span>
+          <select
+            value={exportGroupId}
+            onChange={(event) => setExportGroupId(event.target.value)}
+          >
+            <option value="all">Gesamtes Projekt</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <small>
+          {scopedPanels.filter((panel) => !panel.hidden).length} sichtbare Teile
+          · {usedMaterials.length} verwendete
+          {usedMaterials.length === 1 ? 's' : ''} Material
+          {usedMaterials.length === 1 ? '' : 'ien'}
+        </small>
+      </div>
+      {!analysis && !analysisError && (
+        <div className="manufacturing-loading" role="status" aria-live="polite">
+          <span className="loading-spinner" />
+          <div>
+            <strong>Bearbeitungsschritte werden vorbereitet</strong>
+            <small>
+              Konturen und Aussparungen werden im Hintergrund ausgewertet. Du
+              kannst den Arbeitsbereich bereits verwenden.
+            </small>
+          </div>
+        </div>
+      )}
+      {analysisError && (
+        <div className="export-error" role="alert">
+          <strong>Fertigungsdaten konnten nicht berechnet werden</strong>
+          <span>{analysisError}</span>
+          <button
+            onClick={() => {
+              setAnalysisError(null)
+              setAnalysis(null)
+              if (workerPayload)
+                void workerRef.current
+                  ?.analyze(workerPayload)
+                  .then(setAnalysis)
+                  .catch((error) =>
+                    setAnalysisError(
+                      error instanceof Error ? error.message : String(error),
+                    ),
+                  )
+            }}
+          >
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+      {analysis && missingRecipes.length > 0 && (
+        <div className="recipe-warning" role="alert">
+          <strong>
+            {missingRecipes.length} Laserzuordnung
+            {missingRecipes.length === 1 ? '' : 'en'} nachzupflegen
+          </strong>
+          <span>
+            Die Bearbeitungen bleiben vollständig erhalten. Hinterlege rechts
+            beim ausgewählten Laser die Layerwerte für die markierten Profile;
+            danach wird der Export freigegeben.
+          </span>
+        </div>
+      )}
+      {!usedMaterials.length && (
+        <div className="export-empty">
+          <strong>Nichts zu exportieren</strong>
+          <span>
+            Im gewählten Umfang befinden sich keine sichtbaren, materialisierten
+            Objekte.
+          </span>
+        </div>
+      )}
+      {jobs.map(({ material, steps }) => {
+        const materialPanels = scopedPanels.filter(
+          (panel) => !panel.hidden && panel.materialId === material.id,
+        )
+        const profileStepIds = steps
+          .filter((step) => step.kind === 'profile')
+          .map((step) => step.profileId!)
+        return (
+          <section
+            className="material-job"
+            key={material.id}
+            style={{ '--material-color': material.color } as CSSProperties}
+          >
+            <header>
+              <i />
+              <div>
+                <h3>
+                  {material.name} · {material.thickness} mm
+                </h3>
+                <p>
+                  {materialPanels.length} Bauteil
+                  {materialPanels.length === 1 ? '' : 'e'} · {steps.length}{' '}
+                  tatsächliche Bearbeitungsschritte
+                </p>
+              </div>
+            </header>
+            {!steps.length && (
+              <div className="export-empty compact">
+                <strong>Keine Ausgabe</strong>
+                <span>
+                  Alle Objekte dieses Materials sind vom Schnitt ausgeschlossen
+                  und besitzen keine Bearbeitungsprofile.
+                </span>
+              </div>
+            )}
+            <div className="job-step-list">
+              {steps.map((step, index) => (
+                <article className={`job-step ${step.kind}`} key={step.id}>
+                  <div className="job-order">
+                    <strong>{index + 1}</strong>
+                    {step.kind === 'profile' && (
+                      <span>
+                        <button
+                          disabled={profileStepIds[0] === step.profileId}
+                          onClick={() => moveProfile(step.profileId!, -1)}
+                        >
+                          <ArrowUp />
+                        </button>
+                        <button
+                          disabled={profileStepIds.at(-1) === step.profileId}
+                          onClick={() => moveProfile(step.profileId!, 1)}
+                        >
+                          <ArrowDown />
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                  <i
+                    className="job-color"
+                    style={{ background: step.color }}
+                    title="Automatisch zugeordnete LightBurn-Farbe"
+                  />
+                  <div className="job-identity">
+                    <strong>{step.name}</strong>
+                    <span>
+                      {step.kind === 'profile'
+                        ? `${step.mode === 'fill' ? 'Fläche' : 'Kontur'} · zugewiesenes Profil${step.referenceDepth !== undefined ? ` · Referenz ca. ${step.referenceDepth} mm` : ''}`
+                        : step.kind === 'cut-inner'
+                          ? 'Innenkonturen vor Außenkonturen'
+                          : 'Letzter Schnittschritt'}
+                    </span>
+                    <details>
+                      <summary>
+                        {step.contourCount} Kontur
+                        {step.contourCount === 1 ? '' : 'en'} aus{' '}
+                        {step.objectIds.length} Objekt
+                        {step.objectIds.length === 1 ? '' : 'en'}
+                      </summary>
+                      <ul>
+                        {step.objectIds.map((id) => (
+                          <li key={id}>
+                            {panels.find((panel) => panel.id === id)?.label ??
+                              id}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  </div>
+                  {step.configured ? (
+                    <div className="job-values">
+                      <span>
+                        <small>Geschwindigkeit</small>
+                        <strong>
+                          {step.speed} {activeLaser?.speedUnit}
+                        </strong>
+                      </span>
+                      <span>
+                        <small>Leistung</small>
+                        <strong>{step.power} %</strong>
+                      </span>
+                      <span>
+                        <small>Durchgänge</small>
+                        <strong>{step.passes}×</strong>
+                      </span>
+                      <span>
+                        <small>Air Assist</small>
+                        <strong>{step.airAssist ? 'An' : 'Aus'}</strong>
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="job-values missing-recipe">
+                      <strong>Nachzupflegen</strong>
+                      <span>
+                        Für {activeLaser?.name} und {material.name} ·{' '}
+                        {material.thickness} mm fehlen die Layerwerte.
+                      </span>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          </section>
+        )
+      })}
+      <div className="export-warning">
+        <strong>Vor dem Lasern prüfen</strong>
+        <span>
+          Referenztiefen sind Kalibrierwerte. Vorschau, Fokus und Maschinenwerte
+          am realen Material kontrollieren.
+        </span>
+      </div>
+      {previewMaterial && (
+        <div
+          className="export-preview-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setPreviewMaterialId(null)
+          }}
+        >
+          <section className="export-preview-dialog">
+            <header>
+              <div>
+                <h3>Exportvorschau</h3>
+                <p>
+                  {previewMaterial.name} · {previewMaterial.thickness} mm ·
+                  Farben entsprechen den erzeugten LightBurn-Layern
+                </p>
+              </div>
+              <button onClick={() => setPreviewMaterialId(null)}>
+                <X />
+              </button>
+            </header>
+            <nav>
+              {usedMaterials.map((material) => (
+                <button
+                  className={material.id === previewMaterial.id ? 'active' : ''}
+                  key={material.id}
+                  onClick={() => setPreviewMaterialId(material.id)}
+                >
+                  <i style={{ background: material.color }} />
+                  {material.name} · {material.thickness} mm
+                </button>
+              ))}
+            </nav>
+            <div className="preview-canvas">
+              {previewSvg ? (
+                <div
+                  className="preview-stage"
+                  dangerouslySetInnerHTML={{ __html: previewSvg }}
+                />
+              ) : previewError ? (
+                <div className="preview-status error">
+                  <strong>Vorschau nicht verfügbar</strong>
+                  <span>{previewError}</span>
+                </div>
+              ) : (
+                <div className="preview-status">
+                  <span className="loading-spinner" />
+                  <strong>Vorschau wird erzeugt…</strong>
+                </div>
+              )}
+            </div>
+            <div className="preview-legend">
+              {jobs
+                .find((job) => job.material.id === previewMaterial.id)
+                ?.steps.map((step) => (
+                  <span key={step.id}>
+                    <i style={{ background: step.color }} />
+                    {step.name}
+                  </span>
+                ))}
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  )
+}
