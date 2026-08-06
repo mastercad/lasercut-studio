@@ -42,6 +42,8 @@ export function SvgImportDialog({
   onClose,
 }: Props) {
   const materials = useEditor((state) => state.materials)
+  const laserCutters = useEditor((state) => state.laserCutters)
+  const activeLaserId = useEditor((state) => state.activeLaserId)
   const importSvgObjects = useEditor((state) => state.importSvgObjects)
   const inputRef = useRef<HTMLInputElement>(null)
   const previewSvgRef = useRef<SVGSVGElement>(null)
@@ -312,19 +314,27 @@ export function SvgImportDialog({
     []
   const wizardObject = wizardObjects[wizardIndex]
   const startMaterialWizard = () => {
-    const candidateIds = new Set(wizardObjects.map((object) => object.id))
-    setMaterialWizard(true)
-    setWizardIndex(0)
-    setWizardReviewed(new Set())
-    setIncluded(new Set([...included].filter((id) => !candidateIds.has(id))))
-    setAssignments((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([id]) => !candidateIds.has(id)),
-      ),
+    const reviewed = new Set(
+      wizardObjects
+        .filter(
+          (object) =>
+            Boolean(assignments[object.id]) || !included.has(object.id),
+        )
+        .map((object) => object.id),
     )
-    if (wizardObjects[0]) {
-      setSelected(new Set([wizardObjects[0].id]))
-      focusObject(wizardObjects[0].id)
+    const firstUnmapped = wizardObjects.findIndex(
+      (object) => !reviewed.has(object.id),
+    )
+    const startIndex =
+      reviewed.size > 0 && reviewed.size < wizardObjects.length
+        ? firstUnmapped
+        : 0
+    setMaterialWizard(true)
+    setWizardIndex(startIndex)
+    setWizardReviewed(reviewed)
+    if (wizardObjects[startIndex]) {
+      setSelected(new Set([wizardObjects[startIndex].id]))
+      focusObject(wizardObjects[startIndex].id)
     }
   }
   const showWizardObject = (index: number) => {
@@ -368,6 +378,7 @@ export function SvgImportDialog({
         name: object.name,
         groupName: object.groupName,
         materialId: assignments[object.id],
+        sourceCutIndex: object.sourceCutIndex,
         attachedOperations: object.attachedOperations?.map((operation) => ({
           ...operation,
           faces: operation.faces.map((face) => ({
@@ -395,6 +406,12 @@ export function SvgImportDialog({
     importSvgObjects(
       document.fileName.replace(/\.(?:svg|dxf|lbrn|lbrn2)$/i, ''),
       objects,
+      document.lightBurn
+        ? {
+            settings: document.lightBurn.cutSettings,
+            deviceName: document.lightBurn.deviceName,
+          }
+        : undefined,
     )
     close()
   }
@@ -417,6 +434,20 @@ export function SvgImportDialog({
       .every((object) => assignments[object.id]) ?? false
   const wizardComplete =
     !materialWizard || wizardReviewed.size === wizardObjects.length
+  const usedLightBurnSettings = document?.lightBurn
+    ? new Set(
+        document.objects
+          .filter((object) => included.has(object.id))
+          .flatMap((object) => [
+            ...(object.sourceCutIndex == null ? [] : [object.sourceCutIndex]),
+            ...(object.attachedOperations ?? []).flatMap((operation) =>
+              operation.sourceCutIndex == null
+                ? []
+                : [operation.sourceCutIndex],
+            ),
+          ]),
+      ).size
+    : 0
   return (
     <div
       className="svg-import-backdrop"
@@ -940,6 +971,17 @@ export function SvgImportDialog({
                         </strong>
                         <span>Baugruppen</span>
                       </div>
+                      {document.lightBurn && (
+                        <div>
+                          <strong>{usedLightBurnSettings}</strong>
+                          <span>
+                            LightBurn-Profile für{' '}
+                            {laserCutters.find(
+                              (laser) => laser.id === activeLaserId,
+                            )?.name ?? 'aktiven Laser'}
+                          </span>
+                        </div>
+                      )}
                     </div>
                     <p>
                       Alle Teile werden gemeinsam eingefügt und ausgewählt. Der

@@ -18,6 +18,7 @@ import {
   type MaterialDefinition,
   type PanelDefinition,
   type PanelShape,
+  type SocketPattern,
 } from '../model/box'
 import { bundledFontFamily, missingFontFamilies } from '../model/fonts'
 import { snapPanelPosition, worldHalfExtents } from '../model/snapping'
@@ -31,6 +32,7 @@ import {
   createDefaultProcessingProfiles,
   createDefaultProcessingRecipes,
   defaultLaserCutters,
+  packRectangles,
   type ExportLayerDefinition,
   type LaserCutterDefinition,
   type LaserPreset,
@@ -38,7 +40,19 @@ import {
   type ProcessingRecipe,
 } from '../model/export'
 import { shapeToFreeContour } from '../model/contours'
-import { pruneBooleanGeometryCache } from '../model/panelGeometry'
+import {
+  clearEvaluatedGeometryCache,
+  pruneBooleanGeometryCache,
+} from '../model/panelGeometry'
+import type { Lbrn2CutSetting } from '../model/lbrn2'
+import {
+  buildSocketPattern,
+  buildTransferredSocketPattern,
+  replaceAllSocketPatternCuts,
+  replaceSocketPatternCuts,
+  synchronizeLinkedSocketPatterns,
+} from '../model/socketPatterns'
+import { stretchPanelToNearestNeighbors } from '../model/stretchPanel'
 
 type Workspace = 'model' | 'unfold'
 export type ProjectGroup = {
@@ -73,6 +87,7 @@ type HistorySnapshot = Pick<
   | 'selectedPanels'
   | 'fingerJoints'
   | 'crossJoints'
+  | 'socketPatterns'
   | 'laserTexts'
   | 'processingProfiles'
   | 'processingRecipes'
@@ -90,6 +105,7 @@ const snapshotOf = (state: EditorState): HistorySnapshot => ({
   selectedPanels: state.selectedPanels,
   fingerJoints: state.fingerJoints,
   crossJoints: state.crossJoints,
+  socketPatterns: state.socketPatterns,
   laserTexts: state.laserTexts,
   processingProfiles: state.processingProfiles,
   processingRecipes: state.processingRecipes,
@@ -374,6 +390,7 @@ export type EditorState = {
   materials: MaterialDefinition[]
   fingerJoints: FingerJointDefinition[]
   crossJoints: CrossJointDefinition[]
+  socketPatterns: SocketPattern[]
   laserTexts: LaserTextDefinition[]
   missingFonts: string[]
   exportLayers: ExportLayerDefinition[]
@@ -398,6 +415,7 @@ export type EditorState = {
   transformGridEnabled: boolean
   colorMode: 'material' | 'object'
   operationMessage: string | null
+  isDirty: boolean
   canUndo: boolean
   canRedo: boolean
   rotationPreview: {
@@ -445,14 +463,18 @@ export type EditorState = {
       groupName: string
       materialId: string
       faces: ContourFace[]
+      sourceCutIndex?: number
       attachedOperations?: {
         id: string
         name: string
         operation: string
         shapeType?: string
+        sourceCutIndex?: number
         faces: ContourFace[]
       }[]
     }[],
+    processImport?:
+      Lbrn2CutSetting[] | { settings: Lbrn2CutSetting[]; deviceName: string },
   ) => void
   updatePanelShape: (id: string, shape: PanelShape) => void
   setGeometrySelectionMode: (mode: GeometrySelectionMode) => void
@@ -497,6 +519,28 @@ export type EditorState = {
     clearance: number
     firstFromHigh?: boolean
   }) => void
+  createSocketPattern: (options: {
+    count: number
+    span: number
+    slotLength: number
+    targetThickness: number
+    clearance: number
+    distributionAxis?: 0 | 1 | 2
+    socketType?: 'through' | 'cross'
+    entrySide?: 'negative' | 'positive'
+    depthRatio?: number
+  }) => void
+  updateSocketInstance: (
+    patternId: string,
+    instanceId: string,
+    changes: { offset?: number; deleted?: boolean },
+  ) => void
+  removeSocketPattern: (patternId: string) => void
+  transferSocketPattern: (
+    patternId: string,
+    targetPanelId: string,
+    mode: 'copy' | 'mirror',
+  ) => void
   removeCrossJoint: (jointId: string) => void
   removeFingerJoint: (jointId: string) => void
   removeFingerJointsFromSelection: () => void
@@ -520,6 +564,7 @@ export type EditorState = {
     id: PanelDefinition['id'],
     size: [number, number, number],
   ) => void
+  stretchSelectedToNeighbors: () => void
   movePanel: (
     id: PanelDefinition['id'],
     position: [number, number, number],
@@ -552,6 +597,7 @@ export type EditorState = {
   setWorkspace: (workspace: Workspace) => void
   newProject: (template: 'empty' | 'box') => void
   serializeProject: () => string
+  markProjectSaved: () => void
   loadProject: (contents: string) => boolean
   serializeGroup: (id: string) => string
   updateExportLayer: (
@@ -623,6 +669,7 @@ type ProjectState = Pick<
   | 'materials'
   | 'fingerJoints'
   | 'crossJoints'
+  | 'socketPatterns'
   | 'laserTexts'
   | 'selectedPanels'
   | 'workspace'
@@ -642,6 +689,7 @@ type ProjectState = Pick<
   | 'activeLaserId'
   | 'groups'
   | 'selectedGroupId'
+  | 'isDirty'
 >
 
 type ProjectDocument = {
@@ -653,6 +701,85 @@ type ProjectDocument = {
 }
 
 const autosaveKey = 'lasercut-studio.project.v1'
+const libraryKey = 'lasercut-studio.library.v1'
+type LibraryState = Pick<
+  EditorState,
+  | 'materials'
+  | 'laserCutters'
+  | 'laserPresets'
+  | 'processingProfiles'
+  | 'processingRecipes'
+  | 'activeLaserId'
+>
+const sanitizeLibrary = (library: LibraryState): LibraryState => {
+  const sourceMaterials = Array.isArray(library.materials)
+    ? library.materials
+    : []
+  const sourceLasers = Array.isArray(library.laserCutters)
+    ? library.laserCutters
+    : []
+  const sourceProfiles = Array.isArray(library.processingProfiles)
+    ? library.processingProfiles
+    : []
+  const sourcePresets = Array.isArray(library.laserPresets)
+    ? library.laserPresets
+    : []
+  const sourceRecipes = Array.isArray(library.processingRecipes)
+    ? library.processingRecipes
+    : []
+  const materials = [
+    ...new Map(sourceMaterials.map((item) => [item.id, item])).values(),
+  ]
+  const laserCutters = [
+    ...new Map(sourceLasers.map((item) => [item.id, item])).values(),
+  ]
+  const processingProfiles = [
+    ...new Map(sourceProfiles.map((item) => [item.id, item])).values(),
+  ]
+  const materialIds = new Set(materials.map((item) => item.id))
+  const laserIds = new Set(laserCutters.map((item) => item.id))
+  const profileIds = new Set(processingProfiles.map((item) => item.id))
+  return {
+    materials,
+    laserCutters,
+    processingProfiles,
+    laserPresets: [
+      ...new Map(
+        sourcePresets
+          .filter(
+            (preset) =>
+              laserIds.has(preset.laserId) &&
+              materialIds.has(preset.materialId),
+          )
+          .map((item) => [item.id, item]),
+      ).values(),
+    ],
+    processingRecipes: [
+      ...new Map(
+        sourceRecipes
+          .filter(
+            (recipe) =>
+              profileIds.has(recipe.profileId) &&
+              laserIds.has(recipe.laserId) &&
+              materialIds.has(recipe.materialId),
+          )
+          .map((item) => [item.id, item]),
+      ).values(),
+    ],
+    activeLaserId: laserIds.has(library.activeLaserId)
+      ? library.activeLaserId
+      : (laserCutters[0]?.id ?? ''),
+  }
+}
+const mergeLibraryItems = <T extends { id: string }>(
+  projectItems: T[],
+  libraryItems: T[],
+) => {
+  const merged = new Map(projectItems.map((item) => [item.id, item]))
+  for (const item of libraryItems)
+    if (!merged.has(item.id)) merged.set(item.id, item)
+  return [...merged.values()]
+}
 const hasOffCenterImportedSvg = (panels: PanelDefinition[]) =>
   panels.some((panel) => {
     if (panel.shape?.type !== 'free' || panel.shape.sourceType !== 'svg')
@@ -717,12 +844,39 @@ const recenterImportedSvgPanels = (panels: PanelDefinition[]) =>
       },
     }
   })
+const removeLegacyImportedOperationCopies = (panels: PanelDefinition[]) =>
+  panels.map((panel) => {
+    const operationProfileIds = new Set(
+      (panel.importedOperations ?? [])
+        .filter((operation) => operation.operation.toLowerCase() !== 'cut')
+        .flatMap((operation) =>
+          operation.profileId ? [operation.profileId] : [],
+        ),
+    )
+    if (!operationProfileIds.size) return panel
+    let changed = false
+    const processingAssignments = (panel.processingAssignments ?? []).map(
+      (assignment) => {
+        if (
+          !assignment.faces?.length ||
+          !operationProfileIds.has(assignment.profileId) ||
+          assignment.sourceOperation?.toLowerCase() === 'cut'
+        )
+          return assignment
+        changed = true
+        const { faces: _legacyCopy, ...rest } = assignment
+        return rest
+      },
+    )
+    return changed ? { ...panel, processingAssignments } : panel
+  })
 const projectStateOf = (state: EditorState): ProjectState => ({
   box: state.box,
   panels: state.panels,
   materials: state.materials,
   fingerJoints: state.fingerJoints,
   crossJoints: state.crossJoints,
+  socketPatterns: state.socketPatterns,
   laserTexts: state.laserTexts,
   selectedPanels: state.selectedPanels,
   workspace: state.workspace,
@@ -742,6 +896,7 @@ const projectStateOf = (state: EditorState): ProjectState => ({
   processingRecipes: state.processingRecipes,
   groups: state.groups,
   selectedGroupId: state.selectedGroupId,
+  isDirty: state.isDirty,
 })
 const projectDocumentOf = (
   state: EditorState,
@@ -770,6 +925,22 @@ const persistCompactAutosave = (state: EditorState) => {
     )
   } catch {
     /* Keep the live project usable when storage quota is exhausted. */
+  }
+}
+const persistLibrary = (state: EditorState) => {
+  if (typeof localStorage === 'undefined') return
+  const library: LibraryState = {
+    materials: state.materials,
+    laserCutters: state.laserCutters,
+    laserPresets: state.laserPresets,
+    processingProfiles: state.processingProfiles,
+    processingRecipes: state.processingRecipes,
+    activeLaserId: state.activeLaserId,
+  }
+  try {
+    localStorage.setItem(libraryKey, JSON.stringify(library))
+  } catch {
+    /* The project stays usable if the browser storage quota is exhausted. */
   }
 }
 const parseProject = (contents: string): ProjectDocument | null => {
@@ -845,13 +1016,14 @@ const parseProject = (contents: string): ProjectDocument | null => {
     } else {
       current.processingProfiles = rawProfiles.length
         ? rawProfiles.map(
-            ({ id, name, geometry, referenceDepth, color, order }) => ({
+            ({ id, name, geometry, referenceDepth, color, order, source }) => ({
               id,
               name,
               geometry,
               referenceDepth,
               color,
               order,
+              source,
             }),
           )
         : createDefaultProcessingProfiles()
@@ -891,6 +1063,9 @@ const parseProject = (contents: string): ProjectDocument | null => {
       name: group.name.replace(/^Projektgruppe\b/, 'Baugruppe'),
       visible: group.visible !== false,
     }))
+    current.socketPatterns = Array.isArray(current.socketPatterns)
+      ? current.socketPatterns
+      : []
     current.panels = current.panels.map((panel) => {
       if (Array.isArray(panel.processingAssignments))
         return {
@@ -936,18 +1111,38 @@ const parseProject = (contents: string): ProjectDocument | null => {
     // apply to existing projects instead of preserving obsolete coordinates.
     const migratedSvgPivots = hasOffCenterImportedSvg(current.panels)
     current.panels = recenterImportedSvgPanels(current.panels)
+    current.panels = removeLegacyImportedOperationCopies(current.panels)
     if (migratedSvgPivots) {
       current.selectedGroupId = null
       current.selectedPanels = current.selectedPanels.slice(0, 1)
     }
     value.history.past = value.history.past.map((snapshot) => ({
       ...snapshot,
-      panels: recenterImportedSvgPanels(snapshot.panels),
+      socketPatterns: Array.isArray(snapshot.socketPatterns)
+        ? snapshot.socketPatterns
+        : [],
+      panels: removeLegacyImportedOperationCopies(
+        recenterImportedSvgPanels(snapshot.panels),
+      ),
     }))
     value.history.future = value.history.future.map((snapshot) => ({
       ...snapshot,
-      panels: recenterImportedSvgPanels(snapshot.panels),
+      socketPatterns: Array.isArray(snapshot.socketPatterns)
+        ? snapshot.socketPatterns
+        : [],
+      panels: removeLegacyImportedOperationCopies(
+        recenterImportedSvgPanels(snapshot.panels),
+      ),
     }))
+    const cleanedLibrary = sanitizeLibrary({
+      materials: current.materials,
+      laserCutters: current.laserCutters,
+      laserPresets: current.laserPresets,
+      processingProfiles: current.processingProfiles,
+      processingRecipes: current.processingRecipes,
+      activeLaserId: current.activeLaserId,
+    })
+    Object.assign(current, cleanedLibrary)
     const rebuilt = rebuildConnections(
       current.panels,
       current.fingerJoints,
@@ -973,16 +1168,52 @@ const readAutosave = () => {
 }
 
 const restoredProject = readAutosave()
-const initialProcessingProfiles =
+const restoredLibrary = (() => {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(libraryKey) || 'null',
+    ) as LibraryState | null
+    return parsed ? sanitizeLibrary(parsed) : null
+  } catch {
+    return null
+  }
+})()
+const initialMaterials = mergeLibraryItems(
+  restoredProject?.current.materials ?? defaultMaterials,
+  restoredLibrary?.materials ?? [],
+)
+const initialLaserCutters = mergeLibraryItems(
+  restoredProject?.current.laserCutters ?? defaultLaserCutters,
+  restoredLibrary?.laserCutters ?? [],
+)
+const initialProcessingProfiles = mergeLibraryItems(
   restoredProject?.current.processingProfiles ??
-  createDefaultProcessingProfiles()
+    createDefaultProcessingProfiles(),
+  restoredLibrary?.processingProfiles ?? [],
+)
+const initialLaserPresets = mergeLibraryItems(
+  restoredProject?.current.laserPresets ??
+    createDefaultLaserPresets(initialLaserCutters, initialMaterials),
+  restoredLibrary?.laserPresets ?? [],
+)
+const initialProcessingRecipes = mergeLibraryItems(
+  restoredProject?.current.processingRecipes ??
+    createDefaultProcessingRecipes(
+      initialProcessingProfiles,
+      initialLaserCutters,
+      initialMaterials,
+    ),
+  restoredLibrary?.processingRecipes ?? [],
+)
 
 export const useEditor = create<EditorState>((set) => ({
   box: restoredProject?.current.box ?? defaultBox,
   panels: restoredProject?.current.panels ?? createBoxPanels(defaultBox),
-  materials: restoredProject?.current.materials ?? defaultMaterials,
+  materials: initialMaterials,
   fingerJoints: restoredProject?.current.fingerJoints ?? [],
   crossJoints: restoredProject?.current.crossJoints ?? [],
+  socketPatterns: restoredProject?.current.socketPatterns ?? [],
   laserTexts: restoredProject?.current.laserTexts ?? [],
   missingFonts: [],
   exportLayers:
@@ -990,23 +1221,14 @@ export const useEditor = create<EditorState>((set) => ({
     createDefaultExportLayers(
       restoredProject?.current.materials ?? defaultMaterials,
     ),
-  laserCutters: restoredProject?.current.laserCutters ?? defaultLaserCutters,
-  laserPresets:
-    restoredProject?.current.laserPresets ??
-    createDefaultLaserPresets(
-      defaultLaserCutters,
-      restoredProject?.current.materials ?? defaultMaterials,
-    ),
+  laserCutters: initialLaserCutters,
+  laserPresets: initialLaserPresets,
   processingProfiles: initialProcessingProfiles,
-  processingRecipes:
-    restoredProject?.current.processingRecipes ??
-    createDefaultProcessingRecipes(
-      initialProcessingProfiles,
-      restoredProject?.current.laserCutters ?? defaultLaserCutters,
-      restoredProject?.current.materials ?? defaultMaterials,
-    ),
+  processingRecipes: initialProcessingRecipes,
   activeLaserId:
-    restoredProject?.current.activeLaserId ?? defaultLaserCutters[0].id,
+    restoredLibrary?.activeLaserId ??
+    restoredProject?.current.activeLaserId ??
+    initialLaserCutters[0].id,
   groups: restoredProject?.current.groups ?? [
     {
       id: 'group-1',
@@ -1034,6 +1256,7 @@ export const useEditor = create<EditorState>((set) => ({
   operationMessage: restoredProject
     ? 'Lokales Projekt automatisch wiederhergestellt.'
     : null,
+  isDirty: restoredProject?.current.isDirty ?? false,
   canUndo: Boolean(restoredProject?.history.past.length),
   canRedo: Boolean(restoredProject?.history.future.length),
   rotationPreview: null,
@@ -1454,6 +1677,9 @@ export const useEditor = create<EditorState>((set) => ({
           text.id !== state.selectedTextId &&
           !state.selectedPanels.includes(text.panelId),
       ),
+      socketPatterns: state.socketPatterns.filter(
+        (pattern) => !state.selectedPanels.includes(pattern.panelId),
+      ),
       groups: state.groups.map((group) => ({
         ...group,
         panelIds: group.panelIds.filter(
@@ -1496,7 +1722,7 @@ export const useEditor = create<EditorState>((set) => ({
           label: `${panel.label} Kopie`,
           position: [...panel.position] as [number, number, number],
           cuts: panel.cuts
-            .filter((cut) => !cut.jointId)
+            .filter((cut) => !cut.jointId && !cut.socketPatternId)
             .map((cut) => ({ ...cut, id: operationId('cut') })),
           jointFeatures: [],
           booleanModifiers: panel.booleanModifiers
@@ -1528,6 +1754,23 @@ export const useEditor = create<EditorState>((set) => ({
           label: `${text.label} Kopie`,
           panelId: panelIds.get(text.panelId)!,
         }))
+      const socketPatterns = state.socketPatterns
+        .filter((pattern) => panelIds.has(pattern.panelId))
+        .map((pattern) => {
+          const id = operationId('socket-pattern')
+          return {
+            ...pattern,
+            id,
+            panelId: panelIds.get(pattern.panelId)!,
+            name: `${pattern.name} Kopie`,
+            sourcePatternId: pattern.id,
+            transferMode: 'copy' as const,
+            instances: pattern.instances.map((instance, index) => ({
+              ...instance,
+              id: `${id}-socket-${index + 1}`,
+            })),
+          }
+        })
       const groups = state.groups.map((group) => ({
         ...group,
         panelIds: [
@@ -1543,11 +1786,16 @@ export const useEditor = create<EditorState>((set) => ({
         [...state.crossJoints, ...crossJoints],
         new Set(copies.map((panel) => panel.id)),
       )
+      const panelsWithSockets = socketPatterns.reduce(
+        (panels, pattern) => replaceSocketPatternCuts(panels, pattern),
+        rebuilt.panels,
+      )
       return {
-        panels: rebuilt.panels,
+        panels: panelsWithSockets,
         groups,
         fingerJoints: rebuilt.fingerJoints,
         crossJoints: rebuilt.crossJoints,
+        socketPatterns: [...state.socketPatterns, ...socketPatterns],
         laserTexts: [...state.laserTexts, ...laserTexts],
         selectedPanels: copies.map((panel) => panel.id),
         selectedGroupId: null,
@@ -1595,6 +1843,9 @@ export const useEditor = create<EditorState>((set) => ({
         selectedPanels: [panel.id],
         selectedGroupId: null,
         selectedTextId: null,
+        geometrySelectionMode: 'object',
+        contourSelection: null,
+        transformMode: 'translate',
         operationMessage: `${panel.label} angelegt`,
       }
     }),
@@ -1682,10 +1933,13 @@ export const useEditor = create<EditorState>((set) => ({
         selectedPanels: [panel.id],
         selectedGroupId: null,
         selectedTextId: null,
+        geometrySelectionMode: 'object',
+        contourSelection: null,
+        transformMode: 'translate',
         operationMessage: `${panel.label} angelegt.`,
       }
     }),
-  importSvgObjects: (name, objects) =>
+  importSvgObjects: (name, objects, processImport = []) =>
     set((state) => {
       if (!objects.length)
         return {
@@ -1702,6 +1956,159 @@ export const useEditor = create<EditorState>((set) => ({
         (Math.min(...allPoints.map((point) => point[1])) +
           Math.max(...allPoints.map((point) => point[1]))) /
         2
+      const processSettings = Array.isArray(processImport)
+        ? processImport
+        : processImport.settings
+      const sourceDeviceName = Array.isArray(processImport)
+        ? ''
+        : processImport.deviceName
+      const usedSettingIndexes = new Set(
+        objects.flatMap((object) => [
+          ...(object.sourceCutIndex == null ? [] : [object.sourceCutIndex]),
+          ...(object.attachedOperations ?? []).flatMap((operation) =>
+            operation.sourceCutIndex == null ? [] : [operation.sourceCutIndex],
+          ),
+        ]),
+      )
+      const importedSettings = processSettings
+        .filter((setting) => usedSettingIndexes.has(setting.index))
+        .sort((first, second) => first.priority - second.priority)
+      const activeLaserId = state.activeLaserId || state.laserCutters[0]?.id
+      const importedProfiles: ProcessingProfile[] = []
+      const importedRecipes: ProcessingRecipe[] = []
+      let recipeConflictCount = 0
+      const workingProfiles = [...state.processingProfiles]
+      const workingRecipes = [...state.processingRecipes]
+      const profileBySettingMaterial = new Map<string, ProcessingProfile>()
+      const settingByIndex = new Map(
+        importedSettings.map((setting) => [setting.index, setting]),
+      )
+      const settingFingerprint = (setting: Lbrn2CutSetting) =>
+        JSON.stringify({
+          operation: setting.type.toLowerCase(),
+          speed: setting.speed,
+          minPower: setting.minPower,
+          maxPower: setting.maxPower,
+          passes: setting.passes,
+          interval: setting.interval ?? 0.1,
+          airAssist: setting.airAssist ?? false,
+          output: setting.output ?? true,
+          frequency: setting.frequency,
+          overscanPercent: setting.overscanPercent,
+          angle: setting.angle,
+          focusOffset: setting.focusOffset ?? 0,
+        })
+      const recipeMatches = (
+        recipe: ProcessingRecipe,
+        setting: Lbrn2CutSetting,
+      ) =>
+        recipe.speed === setting.speed &&
+        recipe.power === setting.maxPower &&
+        (recipe.minPower ?? recipe.power) === setting.minPower &&
+        recipe.passes === setting.passes &&
+        recipe.airAssist === (setting.airAssist ?? false) &&
+        recipe.lineInterval === (setting.interval ?? 0.1) &&
+        recipe.focusOffset === (setting.focusOffset ?? 0) &&
+        (recipe.output ?? true) === (setting.output ?? true)
+      const profileFor = (cutIndex: number | undefined, materialId: string) => {
+        if (cutIndex == null || !activeLaserId) return undefined
+        const key = `${cutIndex}:${materialId}`
+        const cached = profileBySettingMaterial.get(key)
+        if (cached) return cached
+        const setting = settingByIndex.get(cutIndex)
+        if (!setting) return undefined
+        const fingerprint = settingFingerprint(setting)
+        const geometry =
+          setting.type.toLowerCase() === 'scan'
+            ? ('fill' as const)
+            : ('contour' as const)
+        const normalizedName = (value: string) =>
+          value
+            .trim()
+            .replace(/^LightBurn C\d+\s*·\s*/i, '')
+            .toLocaleLowerCase('de')
+        let profile = workingProfiles.find(
+          (candidate) =>
+            candidate.geometry === geometry &&
+            normalizedName(candidate.name) === normalizedName(setting.name) &&
+            (!candidate.source?.operation ||
+              candidate.source.operation.toLowerCase() ===
+                setting.type.toLowerCase()),
+        )
+        if (!profile) {
+          profile = {
+            id: operationId(`lightburn-c${setting.index}`),
+            name:
+              setting.name.trim() ||
+              `LightBurn C${setting.index.toString().padStart(2, '0')}`,
+            geometry,
+            referenceDepth: geometry === 'fill' ? 0.1 : undefined,
+            color: setting.color,
+            order: workingProfiles.length,
+            source: {
+              format: 'lightburn',
+              deviceName: sourceDeviceName,
+              cutIndex: setting.index,
+              operation: setting.type,
+              fingerprint,
+            },
+          }
+          workingProfiles.push(profile)
+          importedProfiles.push(profile)
+        }
+        const existingRecipe = workingRecipes.find(
+          (recipe) =>
+            recipe.profileId === profile!.id &&
+            recipe.laserId === activeLaserId &&
+            recipe.materialId === materialId,
+        )
+        if (existingRecipe) {
+          if (!recipeMatches(existingRecipe, setting)) recipeConflictCount += 1
+        } else {
+          const recipe: ProcessingRecipe = {
+            id: operationId('recipe'),
+            profileId: profile.id,
+            laserId: activeLaserId,
+            materialId,
+            speed: setting.speed,
+            power: setting.maxPower,
+            passes: setting.passes,
+            airAssist: setting.airAssist ?? false,
+            lineInterval: setting.interval ?? 0.1,
+            focusOffset: setting.focusOffset ?? 0,
+            layerColor: setting.color,
+            minPower: setting.minPower,
+            sourceCutIndex: setting.index,
+            sourceOperation: setting.type,
+            output: setting.output ?? true,
+            sourceParameters: Object.fromEntries(
+              Object.entries({
+                frequency: setting.frequency,
+                overscanPercent: setting.overscanPercent,
+                angle: setting.angle,
+              }).filter((entry): entry is [string, number] =>
+                Number.isFinite(entry[1]),
+              ),
+            ),
+          }
+          workingRecipes.push(recipe)
+          importedRecipes.push(recipe)
+        }
+        profileBySettingMaterial.set(key, profile)
+        return profile
+      }
+      for (const setting of importedSettings)
+        for (const materialId of new Set(
+          objects.flatMap((object) =>
+            object.sourceCutIndex === setting.index ||
+            object.attachedOperations?.some(
+              (operation) => operation.sourceCutIndex === setting.index,
+            )
+              ? [object.materialId]
+              : [],
+          ),
+        ))
+          profileFor(setting.index, materialId)
       const panels = objects.map((object, index): PanelDefinition => {
         const material =
           state.materials.find(
@@ -1718,20 +2125,22 @@ export const useEditor = create<EditorState>((set) => ({
           (Math.min(...objectPoints.map((point) => point[1])) +
             Math.max(...objectPoints.map((point) => point[1]))) /
           2
-        const faces = object.faces.map((face) => ({
-          ...face,
-          id: operationId('face'),
-          outer: face.outer.map(
-            ([x, y]) =>
-              [x - objectCenterX, y - objectCenterY] as [number, number],
-          ),
-          holes: face.holes.map((hole) =>
-            hole.map(
+        const localizeFaces = (sourceFaces: ContourFace[]) =>
+          sourceFaces.map((face) => ({
+            ...face,
+            id: operationId('face'),
+            outer: face.outer.map(
               ([x, y]) =>
                 [x - objectCenterX, y - objectCenterY] as [number, number],
             ),
-          ),
-        }))
+            holes: face.holes.map((hole) =>
+              hole.map(
+                ([x, y]) =>
+                  [x - objectCenterX, y - objectCenterY] as [number, number],
+              ),
+            ),
+          }))
+        const faces = localizeFaces(object.faces)
         const points = faces
           .flatMap((face) => [face.outer, ...face.holes])
           .flat()
@@ -1759,29 +2168,74 @@ export const useEditor = create<EditorState>((set) => ({
           hidden: false,
           visible: true,
           materialId: material?.id,
-          autoCut: true,
-          processingAssignments: [],
+          autoCut: !profileFor(object.sourceCutIndex, object.materialId),
+          processingAssignments: [
+            ...(object.sourceCutIndex == null ||
+            !profileFor(object.sourceCutIndex, object.materialId)
+              ? []
+              : [
+                  {
+                    id: operationId('assignment'),
+                    profileId: profileFor(
+                      object.sourceCutIndex,
+                      object.materialId,
+                    )!.id,
+                    geometry: profileFor(
+                      object.sourceCutIndex,
+                      object.materialId,
+                    )!.geometry,
+                    faces,
+                    sourceOperation:
+                      processSettings.find(
+                        (setting) => setting.index === object.sourceCutIndex,
+                      )?.type ?? 'Cut',
+                  },
+                ]),
+            ...(object.attachedOperations ?? []).flatMap((operation) => {
+              const profile = profileFor(
+                operation.sourceCutIndex,
+                object.materialId,
+              )
+              return profile
+                ? [
+                    {
+                      id: operationId('assignment'),
+                      profileId: profile.id,
+                      geometry: profile.geometry,
+                      sourceOperation: operation.operation,
+                    },
+                  ]
+                : []
+            }),
+          ],
           importedOperations: object.attachedOperations?.map((operation) => ({
             ...operation,
-            faces: operation.faces.map((face) => ({
-              ...face,
-              outer: face.outer.map(
-                ([x, y]) =>
-                  [x - objectCenterX, y - objectCenterY] as [number, number],
-              ),
-              holes: face.holes.map((hole) =>
-                hole.map(
-                  ([x, y]) =>
-                    [x - objectCenterX, y - objectCenterY] as [number, number],
-                ),
-              ),
-            })),
+            profileId: profileFor(operation.sourceCutIndex, object.materialId)
+              ?.id,
+            faces: localizeFaces(operation.faces),
           })),
           shape: { type: 'free', sourceType: 'svg', faces },
         }
       })
+      const packed = packRectangles(
+        panels.map((panel) => ({
+          panel,
+          width: panel.size[0],
+          height: panel.size[1],
+        })),
+        10,
+        0,
+      )
+      const arrangedPanels = packed.placed.map(({ panel, offset }) => ({
+        ...panel,
+        position: [
+          offset[0] + panel.size[0] / 2 - packed.width / 2,
+          packed.height / 2 - offset[1] - panel.size[1] / 2,
+          0,
+        ] as [number, number, number],
+      }))
       const grouped = new Map<string, string[]>()
-      panels.forEach((panel, index) => {
+      arrangedPanels.forEach((panel, index) => {
         const groupName = objects[index].groupName.trim() || name
         grouped.set(groupName, [...(grouped.get(groupName) ?? []), panel.id])
       })
@@ -1791,14 +2245,20 @@ export const useEditor = create<EditorState>((set) => ({
         panelIds,
         visible: true,
       }))
+      const usedProfileCount = new Set(
+        [...profileBySettingMaterial.values()].map((profile) => profile.id),
+      ).size
+      const reusedProfileCount = usedProfileCount - importedProfiles.length
       return {
-        panels: [...state.panels, ...panels],
+        panels: [...state.panels, ...arrangedPanels],
         groups: [...state.groups, ...groups],
-        selectedPanels: [panels[0].id],
+        processingProfiles: [...state.processingProfiles, ...importedProfiles],
+        processingRecipes: [...state.processingRecipes, ...importedRecipes],
+        selectedPanels: [arrangedPanels[0].id],
         selectedGroupId: null,
         selectedTextId: null,
         workspace: 'model',
-        operationMessage: `${panels.length} SVG-Form${panels.length === 1 ? '' : 'en'} als ${groups.length} Baugruppe${groups.length === 1 ? '' : 'n'} importiert. Das erste Teil ist einzeln ausgewählt.`,
+        operationMessage: `${panels.length} SVG-Form${panels.length === 1 ? '' : 'en'} als ${groups.length} Baugruppe${groups.length === 1 ? '' : 'n'} importiert.${usedProfileCount ? ` Profile: ${reusedProfileCount} wiederverwendet, ${importedProfiles.length} neu.` : ''}${recipeConflictCount ? ` ${recipeConflictCount} abweichende LightBurn-Rezept${recipeConflictCount === 1 ? '' : 'e'} wurden nicht übernommen; vorhandene Bibliothekswerte bleiben aktiv.` : ''} Das erste Teil ist einzeln ausgewählt.`,
       }
     }),
   updatePanelShape: (id, shape) =>
@@ -2160,6 +2620,144 @@ export const useEditor = create<EditorState>((set) => ({
         operationMessage: `Steckkreuz ${Math.round(built.definition.ratio * 100)}/${Math.round((1 - built.definition.ratio) * 100)} erzeugt.`,
       }
     }),
+  createSocketPattern: (options) =>
+    set((state) => {
+      if (state.selectedPanels.length !== 1)
+        return {
+          operationMessage:
+            'Für eine freie Aufnahmenreihe genau eine Trägerplatte auswählen.',
+        }
+      const panel = state.panels.find(
+        (candidate) => candidate.id === state.selectedPanels[0],
+      )
+      if (!panel) return { operationMessage: 'Trägerplatte nicht gefunden.' }
+      const id = operationId('socket-pattern')
+      const pattern = buildSocketPattern(
+        panel,
+        options,
+        id,
+        `Aufnahmenreihe ${state.socketPatterns.filter((item) => item.panelId === panel.id).length + 1}`,
+      )
+      return {
+        socketPatterns: [...state.socketPatterns, pattern],
+        panels: replaceSocketPatternCuts(state.panels, pattern),
+        operationMessage: `${pattern.instances.length} freie Aufnahmen automatisch verteilt.`,
+      }
+    }),
+  updateSocketInstance: (patternId, instanceId, changes) =>
+    set((state) => {
+      const editedPattern = state.socketPatterns.find(
+        (pattern) => pattern.id === patternId,
+      )
+      if (!editedPattern) return state
+      const instanceIndex = editedPattern.instances.findIndex(
+        (instance) => instance.id === instanceId,
+      )
+      if (instanceIndex < 0) return state
+      let root = editedPattern
+      let mirrorSign = 1
+      while (root.sourcePatternId) {
+        if (root.transferMode === 'mirror') mirrorSign *= -1
+        const parent = state.socketPatterns.find(
+          (pattern) => pattern.id === root.sourcePatternId,
+        )
+        if (!parent) break
+        root = parent
+      }
+      const rootChanges: { offset?: number; deleted?: boolean } = {}
+      if (changes.offset != null)
+        rootChanges.offset = changes.offset * mirrorSign
+      if (changes.deleted != null) rootChanges.deleted = changes.deleted
+      const updatedRoot = {
+        ...root,
+        instances: root.instances.map((instance, index) =>
+          index === instanceIndex ? { ...instance, ...rootChanges } : instance,
+        ),
+      }
+      const updatedPatterns = synchronizeLinkedSocketPatterns(
+        state.socketPatterns.map((pattern) =>
+          pattern.id === updatedRoot.id ? updatedRoot : pattern,
+        ),
+        state.panels,
+        updatedRoot.id,
+      )
+      return {
+        socketPatterns: updatedPatterns,
+        panels: replaceAllSocketPatternCuts(state.panels, updatedPatterns),
+        operationMessage: changes.deleted
+          ? 'Verknüpfte Aufnahme deaktiviert.'
+          : 'Position in allen verknüpften Reihen aktualisiert.',
+      }
+    }),
+  removeSocketPattern: (patternId) =>
+    set((state) => ({
+      socketPatterns: state.socketPatterns.filter(
+        (pattern) => pattern.id !== patternId,
+      ),
+      panels: state.panels.map((panel) => ({
+        ...panel,
+        cuts: panel.cuts.filter((cut) => cut.socketPatternId !== patternId),
+      })),
+      operationMessage: 'Freie Aufnahmenreihe entfernt.',
+    })),
+  transferSocketPattern: (patternId, targetPanelId, mode) =>
+    set((state) => {
+      const source = state.socketPatterns.find(
+        (pattern) => pattern.id === patternId,
+      )
+      const sourcePanel = state.panels.find(
+        (panel) => panel.id === source?.panelId,
+      )
+      const target = state.panels.find((panel) => panel.id === targetPanelId)
+      if (!source || !sourcePanel || !target || target.id === sourcePanel.id)
+        return { operationMessage: 'Gültige Zielfläche auswählen.' }
+      let root = source
+      const visited = new Set<string>()
+      while (root.sourcePatternId && !visited.has(root.id)) {
+        visited.add(root.id)
+        const parent = state.socketPatterns.find(
+          (pattern) => pattern.id === root.sourcePatternId,
+        )
+        if (!parent) break
+        root = parent
+      }
+      const belongsToRoot = (pattern: SocketPattern) => {
+        let current = pattern
+        const seen = new Set<string>()
+        while (current.sourcePatternId && !seen.has(current.id)) {
+          seen.add(current.id)
+          const parent = state.socketPatterns.find(
+            (candidate) => candidate.id === current.sourcePatternId,
+          )
+          if (!parent) break
+          current = parent
+        }
+        return current.id === root.id
+      }
+      if (
+        state.socketPatterns.some(
+          (pattern) =>
+            pattern.panelId === targetPanelId && belongsToRoot(pattern),
+        )
+      )
+        return {
+          operationMessage:
+            'Diese Aufnahmenreihe ist auf dem Zielpanel bereits vorhanden.',
+        }
+      const id = operationId('socket-pattern')
+      const pattern = buildTransferredSocketPattern(
+        source,
+        sourcePanel,
+        target,
+        id,
+        mode,
+      )
+      return {
+        socketPatterns: [...state.socketPatterns, pattern],
+        panels: replaceSocketPatternCuts(state.panels, pattern),
+        operationMessage: `${source.name} wurde ${mode === 'mirror' ? 'gespiegelt' : 'kopiert'} und bleibt mit der Quelle verknüpft.`,
+      }
+    }),
   removeCrossJoint: (jointId) =>
     set((state) => ({
       panels: state.panels.map((panel) => ({
@@ -2385,6 +2983,37 @@ export const useEditor = create<EditorState>((set) => ({
             ) as [number, number, number],
           }
         }),
+      }
+    }),
+  stretchSelectedToNeighbors: () =>
+    set((state) => {
+      if (state.selectedPanels.length !== 1)
+        return {
+          operationMessage: 'Zum Strecken genau ein Panel auswählen.',
+        }
+      const target = state.panels.find(
+        (panel) => panel.id === state.selectedPanels[0],
+      )
+      if (!target) return state
+      const stretched = stretchPanelToNearestNeighbors(target, state.panels)
+      if (!stretched)
+        return {
+          operationMessage: 'Keine passenden Nachbarn in Reichweite gefunden.',
+        }
+      const changed = state.panels.map((panel) =>
+        panel.id === target.id ? stretched.panel : panel,
+      )
+      const rebuilt = rebuildConnections(
+        changed,
+        state.fingerJoints,
+        state.crossJoints,
+        new Set([target.id]),
+      )
+      return {
+        panels: rebuilt.panels,
+        fingerJoints: rebuilt.fingerJoints,
+        crossJoints: rebuilt.crossJoints,
+        operationMessage: `${target.label} bis zu den nächsten Nachbarn gestreckt.`,
       }
     }),
   movePanel: (id, position) =>
@@ -2696,6 +3325,7 @@ export const useEditor = create<EditorState>((set) => ({
       groups,
       fingerJoints: [],
       crossJoints: [],
+      socketPatterns: [],
       laserTexts: [],
       selectedPanels: [],
       selectedGroupId: null,
@@ -2708,15 +3338,27 @@ export const useEditor = create<EditorState>((set) => ({
         template === 'box'
           ? 'Neues Projekt mit Standardbox angelegt.'
           : 'Neues leeres Projekt angelegt.',
+      isDirty: false,
       canUndo: false,
       canRedo: false,
       rotationPreview: null,
       jointPreview: null,
     })
     historyRestoring = false
+    clearEvaluatedGeometryCache()
+    pruneBooleanGeometryCache([])
+    if (autosaveTimer) {
+      clearTimeout(autosaveTimer)
+      autosaveTimer = null
+    }
+    persistCompactAutosave(useEditor.getState())
   },
-  serializeProject: (): string =>
-    JSON.stringify(projectDocumentOf(useEditor.getState()), null, 2),
+  serializeProject: (): string => {
+    const document = projectDocumentOf(useEditor.getState())
+    document.current.isDirty = false
+    return JSON.stringify(document, null, 2)
+  },
+  markProjectSaved: () => set({ isDirty: false }),
   serializeGroup: (id): string => {
     const state = useEditor.getState()
     const group = state.groups.find((candidate) => candidate.id === id)
@@ -2773,16 +3415,49 @@ export const useEditor = create<EditorState>((set) => ({
     const missingFonts = missingFontFamilies(
       document.current.laserTexts.map((text) => text.fontFamily),
     )
-    set({
-      ...document.current,
-      canUndo: historyPast.length > 0,
-      canRedo: historyFuture.length > 0,
-      operationMessage: missingFonts.length
-        ? `Projekt geladen; ${missingFonts.length} Schriftart(en) fehlen.`
-        : 'Projektdatei erfolgreich geladen.',
-      rotationPreview: null,
-      selectedTextId: null,
-      missingFonts,
+    set((state) => {
+      const materials = mergeLibraryItems(
+        document.current.materials,
+        state.materials,
+      )
+      const laserCutters = mergeLibraryItems(
+        document.current.laserCutters,
+        state.laserCutters,
+      )
+      const laserPresets = mergeLibraryItems(
+        document.current.laserPresets,
+        state.laserPresets,
+      )
+      const processingProfiles = mergeLibraryItems(
+        document.current.processingProfiles,
+        state.processingProfiles,
+      )
+      const processingRecipes = mergeLibraryItems(
+        document.current.processingRecipes,
+        state.processingRecipes,
+      )
+      return {
+        ...document.current,
+        materials,
+        laserCutters,
+        laserPresets,
+        processingProfiles,
+        processingRecipes,
+        activeLaserId: laserCutters.some(
+          (laser) => laser.id === state.activeLaserId,
+        )
+          ? state.activeLaserId
+          : document.current.activeLaserId,
+        canUndo: historyPast.length > 0,
+        canRedo: historyFuture.length > 0,
+        operationMessage: missingFonts.length
+          ? `Projekt geladen; ${missingFonts.length} Schriftart(en) fehlen.`
+          : 'Projektdatei erfolgreich geladen; Bibliothek wurde zusammengeführt.',
+        rotationPreview: null,
+        selectedTextId: null,
+        missingFonts,
+        isDirty: false,
+      }
     })
     historyRestoring = false
     return true
@@ -3203,6 +3878,33 @@ useEditor.subscribe((state, previous) => {
     state.groups !== previous.groups ||
     state.fingerJoints !== previous.fingerJoints ||
     state.crossJoints !== previous.crossJoints ||
+    state.socketPatterns !== previous.socketPatterns ||
+    state.laserTexts !== previous.laserTexts ||
+    state.exportLayers !== previous.exportLayers ||
+    state.laserCutters !== previous.laserCutters ||
+    state.laserPresets !== previous.laserPresets ||
+    state.processingProfiles !== previous.processingProfiles ||
+    state.processingRecipes !== previous.processingRecipes ||
+    state.activeLaserId !== previous.activeLaserId ||
+    state.colorMode !== previous.colorMode ||
+    state.isDirty !== previous.isDirty
+  if (typeof localStorage !== 'undefined' && persistedProjectChanged) {
+    if (autosaveTimer) clearTimeout(autosaveTimer)
+    autosaveTimer = setTimeout(() => {
+      const current = useEditor.getState()
+      persistCompactAutosave(current)
+      persistLibrary(current)
+    }, 750)
+  }
+  if (historyRestoring || transformSnapshot) return
+  const projectContentChanged =
+    state.panels !== previous.panels ||
+    state.box !== previous.box ||
+    state.materials !== previous.materials ||
+    state.groups !== previous.groups ||
+    state.fingerJoints !== previous.fingerJoints ||
+    state.crossJoints !== previous.crossJoints ||
+    state.socketPatterns !== previous.socketPatterns ||
     state.laserTexts !== previous.laserTexts ||
     state.exportLayers !== previous.exportLayers ||
     state.laserCutters !== previous.laserCutters ||
@@ -3211,14 +3913,8 @@ useEditor.subscribe((state, previous) => {
     state.processingRecipes !== previous.processingRecipes ||
     state.activeLaserId !== previous.activeLaserId ||
     state.colorMode !== previous.colorMode
-  if (typeof localStorage !== 'undefined' && persistedProjectChanged) {
-    if (autosaveTimer) clearTimeout(autosaveTimer)
-    autosaveTimer = setTimeout(
-      () => persistCompactAutosave(useEditor.getState()),
-      750,
-    )
-  }
-  if (historyRestoring || transformSnapshot) return
+  if (projectContentChanged && !state.isDirty)
+    useEditor.setState({ isDirty: true })
   if (
     state.panels !== previous.panels ||
     state.box !== previous.box ||
@@ -3235,4 +3931,5 @@ useEditor.subscribe((state, previous) => {
 
 if (typeof localStorage !== 'undefined') {
   persistCompactAutosave(useEditor.getState())
+  persistLibrary(useEditor.getState())
 }

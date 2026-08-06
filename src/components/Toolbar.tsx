@@ -6,8 +6,10 @@ import {
   FolderOpen,
   Grid3X3,
   Magnet,
+  Maximize2,
   Move3D,
   Palette,
+  PanelsTopLeft,
   Redo2,
   Rotate3D,
   Save,
@@ -21,6 +23,7 @@ import { useEditor } from '../store/editor'
 import { ConfirmDialog } from './ConfirmDialog'
 import { SvgImportDialog } from './SvgImportDialog'
 import { NewProjectDialog } from './NewProjectDialog'
+import { SocketPatternDialog } from './SocketPatternDialog'
 
 const ToolButton = ({
   children,
@@ -50,12 +53,19 @@ export function Toolbar() {
   const [svgImportOpen, setSvgImportOpen] = useState(false)
   const [newProjectOpen, setNewProjectOpen] = useState(false)
   const [transformSettingsOpen, setTransformSettingsOpen] = useState(false)
+  const [socketDialogOpen, setSocketDialogOpen] = useState(false)
   const [svgImportFile, setSvgImportFile] = useState<File | null>(null)
+  const [pendingDirtyAction, setPendingDirtyAction] = useState<
+    (() => void) | null
+  >(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const selected = useEditor((state) => state.selectedPanels)
   const selectedTextId = useEditor((state) => state.selectedTextId)
   const removeSelected = useEditor((state) => state.removeSelected)
   const duplicateSelected = useEditor((state) => state.duplicateSelected)
+  const stretchSelectedToNeighbors = useEditor(
+    (state) => state.stretchSelectedToNeighbors,
+  )
   const transformMode = useEditor((state) => state.transformMode)
   const setTransformMode = useEditor((state) => state.setTransformMode)
   const geometrySelectionMode = useEditor(
@@ -67,6 +77,7 @@ export function Toolbar() {
   const addShape = useEditor((state) => state.addShape)
   const snapEnabled = useEditor((state) => state.snapEnabled)
   const toggleSnap = useEditor((state) => state.toggleSnap)
+  const setJointPreview = useEditor((state) => state.setJointPreview)
   const undo = useEditor((state) => state.undo)
   const redo = useEditor((state) => state.redo)
   const canUndo = useEditor((state) => state.canUndo)
@@ -88,6 +99,8 @@ export function Toolbar() {
   const serializeProject = useEditor((state) => state.serializeProject)
   const loadProject = useEditor((state) => state.loadProject)
   const newProject = useEditor((state) => state.newProject)
+  const isDirty = useEditor((state) => state.isDirty)
+  const markProjectSaved = useEditor((state) => state.markProjectSaved)
   const setWorkspace = useEditor((state) => state.setWorkspace)
   const workspace = useEditor((state) => state.workspace)
   const missingFonts = useEditor((state) => state.missingFonts)
@@ -100,7 +113,19 @@ export function Toolbar() {
     link.download = `lasercut-projekt-${new Date().toISOString().slice(0, 10)}.lcs.json`
     link.click()
     URL.revokeObjectURL(url)
-  }, [serializeProject])
+    markProjectSaved()
+  }, [markProjectSaved, serializeProject])
+  const guardUnsaved = useCallback((action: () => void) => {
+    if (!useEditor.getState().isDirty) return action()
+    setPendingDirtyAction(() => action)
+  }, [])
+  const continueDirtyAction = (saveFirst: boolean) => {
+    const action = pendingDirtyAction
+    if (!action) return
+    if (saveFirst) saveProject()
+    setPendingDirtyAction(null)
+    action()
+  }
   useEffect(() => {
     const handleSaveShortcut = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's')
@@ -111,6 +136,15 @@ export function Toolbar() {
     window.addEventListener('keydown', handleSaveShortcut)
     return () => window.removeEventListener('keydown', handleSaveShortcut)
   }, [saveProject])
+  useEffect(() => {
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!useEditor.getState().isDirty) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeUnload)
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload)
+  }, [])
   useEffect(() => {
     const handleDuplicateShortcut = (event: KeyboardEvent) => {
       if (
@@ -141,13 +175,33 @@ export function Toolbar() {
           setSvgImportOpen(false)
         }}
       />
+      <SocketPatternDialog
+        open={socketDialogOpen}
+        onClose={() => {
+          setJointPreview(null)
+          setSocketDialogOpen(false)
+        }}
+      />
       <NewProjectDialog
         open={newProjectOpen}
         onCancel={() => setNewProjectOpen(false)}
         onChoose={(template) => {
-          newProject(template)
-          setNewProjectOpen(false)
+          guardUnsaved(() => {
+            newProject(template)
+            setNewProjectOpen(false)
+          })
         }}
+      />
+      <ConfirmDialog
+        open={Boolean(pendingDirtyAction)}
+        title="Ungespeicherte Änderungen"
+        description="Das aktuelle Projekt enthält Änderungen, die noch nicht als Projektdatei gespeichert wurden."
+        detail="Wenn du fortfährst, wird das aktuelle Projekt ersetzt beziehungsweise der Import gestartet."
+        confirmLabel="Ohne Speichern fortfahren"
+        secondaryLabel="Projekt speichern"
+        onSecondary={() => continueDirtyAction(true)}
+        onConfirm={() => continueDirtyAction(false)}
+        onCancel={() => setPendingDirtyAction(null)}
       />
       <ConfirmDialog
         open={missingFonts.length > 0}
@@ -161,7 +215,7 @@ export function Toolbar() {
       <header className="toolbar">
         <div className="brand">
           <div className="brand-mark">LC</div>
-          <span>LaserCut Studio</span>
+          <span>LaserCut Studio{isDirty ? ' *' : ''}</span>
         </div>
         <div className="toolbar-group">
           <ToolButton
@@ -172,7 +226,7 @@ export function Toolbar() {
           </ToolButton>
           <ToolButton
             title="Projektdatei öffnen"
-            onClick={() => fileInput.current?.click()}
+            onClick={() => guardUnsaved(() => fileInput.current?.click())}
           >
             <FolderOpen />
           </ToolButton>
@@ -221,7 +275,7 @@ export function Toolbar() {
         </div>
         <button
           className="svg-import-button"
-          onClick={() => setSvgImportOpen(true)}
+          onClick={() => guardUnsaved(() => setSvgImportOpen(true))}
         >
           <FileUp /> SVG/DXF/LightBurn importieren
         </button>
@@ -255,6 +309,13 @@ export function Toolbar() {
             ))}
           </div>
           <ToolButton
+            title="Freie Aufnahmen verwalten"
+            active={socketDialogOpen}
+            onClick={() => setSocketDialogOpen(true)}
+          >
+            <PanelsTopLeft />
+          </ToolButton>
+          <ToolButton
             title="Verschieben (G)"
             active={transformMode === 'translate'}
             onClick={() => setTransformMode('translate')}
@@ -274,6 +335,15 @@ export function Toolbar() {
             onClick={() => setTransformMode('scale')}
           >
             <Scaling />
+          </ToolButton>
+          <ToolButton
+            title="Panel bis zu den nächsten Nachbarn strecken"
+            disabled={
+              selected.length !== 1 || geometrySelectionMode !== 'object'
+            }
+            onClick={stretchSelectedToNeighbors}
+          >
+            <Maximize2 />
           </ToolButton>
           <ToolButton
             title="Flächen-Snapping"

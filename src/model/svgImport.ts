@@ -16,6 +16,7 @@ export type SvgImportObject = {
   faces: ContourFace[]
   bounds: { minX: number; minY: number; maxX: number; maxY: number }
   sourceLayer?: string
+  sourceCutIndex?: number
   sourceOperation?: string
   sourceShapeType?: string
   recommendedInclude?: boolean
@@ -26,6 +27,7 @@ export type SvgImportOperation = {
   name: string
   operation: string
   shapeType?: string
+  sourceCutIndex?: number
   faces: ContourFace[]
 }
 export type SvgImportDocument = {
@@ -245,6 +247,10 @@ export function parseSvgImport(
         maxY: Math.max(...points.map((point) => point[1])),
       },
       sourceLayer: layerName || undefined,
+      sourceCutIndex:
+        cutIndex != null && Number.isFinite(Number(cutIndex))
+          ? Number(cutIndex)
+          : undefined,
       sourceOperation,
       sourceShapeType,
     })
@@ -362,6 +368,7 @@ function prepareLightBurnObjects(objects: SvgImportObject[]) {
       name: operation.name,
       operation: operation.sourceOperation ?? 'Unbekannt',
       shapeType: operation.sourceShapeType,
+      sourceCutIndex: operation.sourceCutIndex,
       faces: operation.faces,
     })
     attachedOperationCount += 1

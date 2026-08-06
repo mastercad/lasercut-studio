@@ -235,7 +235,11 @@ export function createPanelGeometry(panel: PanelDefinition) {
       operation: 'subtract' as const,
       shape: 'box' as const,
       center: cut.center,
-      size: cut.size,
+      size: cut.socketPatternId
+        ? (cut.size.map((value, axis) =>
+            axis === thinAxis(panel) ? panel.size[axis] + 0.2 : value,
+          ) as [number, number, number])
+        : cut.size,
     })),
     ...panel.jointFeatures.filter(
       (feature) => feature.operation === 'subtract' && feature.shape === 'box',
@@ -247,9 +251,9 @@ export function createPanelGeometry(panel: PanelDefinition) {
         feature.operation === 'subtract' && feature.shape === 'cylinder',
     )
     .map(featureGeometry)
-  const importedSubtractions = (panel.importedOperations ?? []).map(
-    (operation) => importedOperationGeometry(panel, operation),
-  )
+  const importedSubtractions = (panel.importedOperations ?? [])
+    .filter((operation) => operation.operation.toLowerCase() === 'cut')
+    .map((operation) => importedOperationGeometry(panel, operation))
   result = evaluateBatch(evaluator, result, additions, ADDITION)
   result = evaluateBatch(evaluator, result, boxSubtractions, SUBTRACTION)
   result = evaluateBatch(evaluator, result, reliefSubtractions, SUBTRACTION)
@@ -288,6 +292,11 @@ function createRectilinearPanelGeometry(
   panel: PanelDefinition,
 ): BufferGeometry | null {
   if (panel.shape && panel.shape.type !== 'rectangle') return null
+  // An edited rectangle is defined by its live contour, not by panel.size.
+  // Falling back to the contour extrusion makes face/edge drags alter the
+  // actual visible solid on every pointer movement.
+  if (panel.shape?.type === 'rectangle' && panel.shape.editedFaces?.length)
+    return null
   if (panel.booleanModifiers.some((modifier) => modifier.enabled)) return null
   if (
     panel.jointFeatures.some(
@@ -477,7 +486,9 @@ export function panelGeometryKey(
     panel.shape,
     panel.cuts,
     panel.jointFeatures,
-    panel.importedOperations,
+    panel.importedOperations?.filter(
+      (operation) => operation.operation.toLowerCase() === 'cut',
+    ),
   ])
   const targetInverse = objectMatrix(panel).invert()
   const modifiers = panel.booleanModifiers

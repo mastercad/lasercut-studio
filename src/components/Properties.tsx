@@ -279,6 +279,12 @@ export function Properties() {
   const [contourX, setContourX] = useState(1)
   const [contourY, setContourY] = useState(0)
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
+  const [socketCount, setSocketCount] = useState(4)
+  const [socketSpan, setSocketSpan] = useState(60)
+  const [socketLength, setSocketLength] = useState(15)
+  const [socketClearance, setSocketClearance] = useState(0.2)
+  const [socketMaterialId, setSocketMaterialId] = useState('birch-3')
+  const [socketTargetPanelId, setSocketTargetPanelId] = useState('')
   const box = useEditor((state) => state.box)
   const setDimension = useEditor((state) => state.setDimension)
   const selected = useEditor((state) => state.selectedPanels)
@@ -316,6 +322,13 @@ export function Properties() {
   const crossJoints = useEditor((state) => state.crossJoints)
   const createCrossJoint = useEditor((state) => state.createCrossJoint)
   const removeCrossJoint = useEditor((state) => state.removeCrossJoint)
+  const socketPatterns = useEditor((state) => state.socketPatterns)
+  const createSocketPattern = useEditor((state) => state.createSocketPattern)
+  const updateSocketInstance = useEditor((state) => state.updateSocketInstance)
+  const removeSocketPattern = useEditor((state) => state.removeSocketPattern)
+  const transferSocketPattern = useEditor(
+    (state) => state.transferSocketPattern,
+  )
   const rotationPreview = useEditor((state) => state.rotationPreview)
   const setJointPreview = useEditor((state) => state.setJointPreview)
   const updateCut = useEditor((state) => state.updateCut)
@@ -1384,6 +1397,222 @@ export function Properties() {
           )}
         </SidebarAccordion>
       )}
+      {selectedPanel &&
+        socketPatterns.length < 0 &&
+        geometrySelectionMode === 'object' && (
+          <SidebarAccordion
+            key="socket-patterns"
+            id="socket-patterns"
+            title={`Freie Aufnahmen · ${socketPatterns.filter((pattern) => pattern.panelId === selectedPanel!.id).length}`}
+            className="socket-patterns"
+          >
+            <small className="property-help">
+              Erzeugt unabhängige Steckplätze ohne vorhandenes Gegenbauteil.
+            </small>
+            <div className="profile-parameter-grid">
+              <label className="number-field compact">
+                <span>Anzahl</span>
+                <div>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={socketCount}
+                    onChange={(event) =>
+                      setSocketCount(Math.max(1, Number(event.target.value)))
+                    }
+                  />
+                </div>
+              </label>
+              <label className="number-field compact">
+                <span>Verteilspanne</span>
+                <div>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={socketSpan}
+                    onChange={(event) =>
+                      setSocketSpan(Number(event.target.value))
+                    }
+                  />
+                  <em>mm</em>
+                </div>
+              </label>
+              <label className="number-field compact">
+                <span>Aufnahmelänge</span>
+                <div>
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="1"
+                    value={socketLength}
+                    onChange={(event) =>
+                      setSocketLength(Math.max(0.1, Number(event.target.value)))
+                    }
+                  />
+                  <em>mm</em>
+                </div>
+              </label>
+              <label className="number-field compact">
+                <span>Spiel</span>
+                <div>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={socketClearance}
+                    onChange={(event) =>
+                      setSocketClearance(Number(event.target.value))
+                    }
+                  />
+                  <em>mm</em>
+                </div>
+              </label>
+            </div>
+            <label className="select-field">
+              <span>Zielmaterial des späteren Trenners</span>
+              <select
+                value={socketMaterialId}
+                onChange={(event) => setSocketMaterialId(event.target.value)}
+              >
+                {materials.map((material) => (
+                  <option key={material.id} value={material.id}>
+                    {material.name} · {material.thickness} mm
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              className="apply-joint"
+              onClick={() =>
+                createSocketPattern({
+                  count: socketCount,
+                  span: socketSpan,
+                  slotLength: socketLength,
+                  targetThickness:
+                    materials.find(
+                      (material) => material.id === socketMaterialId,
+                    )?.thickness ?? 3,
+                  clearance: socketClearance,
+                })
+              }
+            >
+              Aufnahmen automatisch verteilen
+            </button>
+            {socketPatterns
+              .filter((pattern) => pattern.panelId === selectedPanel!.id)
+              .map((pattern) => (
+                <details key={pattern.id} open>
+                  <summary>
+                    <span>{pattern.name}</span>
+                    <button
+                      onClick={(event) => {
+                        event.preventDefault()
+                        removeSocketPattern(pattern.id)
+                      }}
+                    >
+                      Entfernen
+                    </button>
+                  </summary>
+                  {pattern.instances.map((instance, index) => (
+                    <div className="socket-instance" key={instance.id}>
+                      <span>Aufnahme {index + 1}</span>
+                      <label className="number-field compact">
+                        <span>Position</span>
+                        <div>
+                          <input
+                            type="number"
+                            step="0.5"
+                            disabled={instance.deleted}
+                            value={Number(
+                              (instance.basePosition + instance.offset).toFixed(
+                                2,
+                              ),
+                            )}
+                            onChange={(event) =>
+                              updateSocketInstance(pattern.id, instance.id, {
+                                offset:
+                                  Number(event.target.value) -
+                                  instance.basePosition,
+                              })
+                            }
+                          />
+                          <em>mm</em>
+                        </div>
+                      </label>
+                      <button
+                        className="secondary"
+                        onClick={() =>
+                          updateSocketInstance(pattern.id, instance.id, {
+                            offset: instance.deleted ? instance.offset : 0,
+                            deleted: !instance.deleted,
+                          })
+                        }
+                      >
+                        {instance.deleted ? 'Wiederherstellen' : 'Löschen'}
+                      </button>
+                      {!instance.deleted && instance.offset !== 0 && (
+                        <button
+                          className="secondary"
+                          onClick={() =>
+                            updateSocketInstance(pattern.id, instance.id, {
+                              offset: 0,
+                            })
+                          }
+                        >
+                          Zurücksetzen
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <label className="select-field">
+                    <span>Auf anderes Teil übertragen</span>
+                    <select
+                      value={socketTargetPanelId}
+                      onChange={(event) =>
+                        setSocketTargetPanelId(event.target.value)
+                      }
+                    >
+                      <option value="">Zielfläche wählen …</option>
+                      {panels
+                        .filter((panel) => panel.id !== selectedPanel!.id)
+                        .map((panel) => (
+                          <option key={panel.id} value={panel.id}>
+                            {panel.label}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <div className="button-row">
+                    <button
+                      disabled={!socketTargetPanelId}
+                      onClick={() =>
+                        transferSocketPattern(
+                          pattern.id,
+                          socketTargetPanelId,
+                          'copy',
+                        )
+                      }
+                    >
+                      Identisch kopieren
+                    </button>
+                    <button
+                      disabled={!socketTargetPanelId}
+                      onClick={() =>
+                        transferSocketPattern(
+                          pattern.id,
+                          socketTargetPanelId,
+                          'mirror',
+                        )
+                      }
+                    >
+                      Spiegeln
+                    </button>
+                  </div>
+                </details>
+              ))}
+          </SidebarAccordion>
+        )}
       {selectedPanel && selectedPanel.cuts.length > 0 && (
         <SidebarAccordion
           key="cuts"
@@ -1391,73 +1620,157 @@ export function Properties() {
           title={`Aussparungen · ${selectedPanel.cuts.length}`}
           className="cut-list"
         >
-          {selectedPanel.cuts.map((cut, cutIndex) => (
-            <details key={cut.id} open={selectedPanel.cuts.length === 1}>
-              <summary>
-                <span>
-                  {cut.kind === 'half-lap'
-                    ? '50/50-Steckschlitz'
-                    : 'Rechteckiger Durchbruch'}{' '}
-                  {cutIndex + 1}
-                </span>
-                <button
-                  onClick={(event) => {
-                    event.preventDefault()
-                    removeCut(selectedPanel.id, cut.id)
-                  }}
-                >
-                  Entfernen
-                </button>
-              </summary>
-              <h4>Position im Teil</h4>
-              {(['X', 'Y', 'Z'] as const).map((axis, index) => (
-                <label className="number-field compact" key={`center-${axis}`}>
-                  <span>{axis}</span>
-                  <div>
-                    <input
-                      type="number"
-                      step="1"
-                      value={Number(cut.center[index].toFixed(2))}
-                      onChange={(event) =>
-                        updateCut(
-                          selectedPanel.id,
-                          cut.id,
-                          'center',
-                          index as 0 | 1 | 2,
-                          Number(event.target.value),
+          {selectedPanel.cuts.map((cut, cutIndex) => {
+            const socketPattern = cut.socketPatternId
+              ? socketPatterns.find(
+                  (pattern) => pattern.id === cut.socketPatternId,
+                )
+              : undefined
+            const socketInstance = socketPattern?.instances.find(
+              (instance) => instance.id === cut.socketInstanceId,
+            )
+            return (
+              <details key={cut.id} open={selectedPanel.cuts.length === 1}>
+                <summary>
+                  <span>
+                    {socketPattern?.socketType === 'cross'
+                      ? 'Kreuzsteckaufnahme'
+                      : socketPattern
+                        ? 'Freie Steckaufnahme'
+                        : cut.kind === 'half-lap'
+                          ? '50/50-Steckschlitz'
+                          : 'Rechteckiger Durchbruch'}{' '}
+                    {cutIndex + 1}
+                  </span>
+                  <button
+                    onClick={(event) => {
+                      event.preventDefault()
+                      if (socketPattern && socketInstance)
+                        updateSocketInstance(
+                          socketPattern.id,
+                          socketInstance.id,
+                          { deleted: true },
                         )
-                      }
-                    />
-                    <em>mm</em>
-                  </div>
-                </label>
-              ))}
-              <h4>Größe des Schnitts</h4>
-              {(['X', 'Y', 'Z'] as const).map((axis, index) => (
-                <label className="number-field compact" key={`size-${axis}`}>
-                  <span>{axis}</span>
-                  <div>
-                    <input
-                      type="number"
-                      min="0.1"
-                      step="1"
-                      value={Number(cut.size[index].toFixed(2))}
-                      onChange={(event) =>
-                        updateCut(
-                          selectedPanel.id,
-                          cut.id,
-                          'size',
-                          index as 0 | 1 | 2,
-                          Number(event.target.value),
-                        )
-                      }
-                    />
-                    <em>mm</em>
-                  </div>
-                </label>
-              ))}
-            </details>
-          ))}
+                      else removeCut(selectedPanel.id, cut.id)
+                    }}
+                  >
+                    Entfernen
+                  </button>
+                </summary>
+                {socketPattern && socketInstance ? (
+                  <>
+                    <small className="property-help">
+                      {socketPattern.name} ·{' '}
+                      {socketPattern.socketType === 'cross'
+                        ? `${socketPattern.entrySide === 'negative' ? 'Kante B' : 'Kante A'} · ${Math.round((socketPattern.depthRatio ?? 0.5) * 100)} % Tiefe`
+                        : `${socketPattern.slotLength.toFixed(1)} mm Länge`}
+                    </small>
+                    <label className="number-field compact">
+                      <span>
+                        {socketPattern.distributionAxis === 0
+                          ? 'Abstand von linker Kante'
+                          : socketPattern.distributionAxis === 1
+                            ? 'Abstand von unterer Kante'
+                            : 'Abstand von vorderer Kante'}
+                      </span>
+                      <div>
+                        <input
+                          type="number"
+                          min="0"
+                          max={
+                            selectedPanel.size[socketPattern.distributionAxis]
+                          }
+                          step="0.5"
+                          value={Number(
+                            (
+                              socketInstance.basePosition +
+                              socketInstance.offset +
+                              selectedPanel.size[
+                                socketPattern.distributionAxis
+                              ] /
+                                2
+                            ).toFixed(2),
+                          )}
+                          onChange={(event) =>
+                            updateSocketInstance(
+                              socketPattern.id,
+                              socketInstance.id,
+                              {
+                                offset:
+                                  Number(event.target.value) -
+                                  selectedPanel.size[
+                                    socketPattern.distributionAxis
+                                  ] /
+                                    2 -
+                                  socketInstance.basePosition,
+                              },
+                            )
+                          }
+                        />
+                        <em>mm</em>
+                      </div>
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <h4>Position im Teil</h4>
+                    {(['X', 'Y', 'Z'] as const).map((axis, index) => (
+                      <label
+                        className="number-field compact"
+                        key={`center-${axis}`}
+                      >
+                        <span>{axis}</span>
+                        <div>
+                          <input
+                            type="number"
+                            step="1"
+                            value={Number(cut.center[index].toFixed(2))}
+                            onChange={(event) =>
+                              updateCut(
+                                selectedPanel.id,
+                                cut.id,
+                                'center',
+                                index as 0 | 1 | 2,
+                                Number(event.target.value),
+                              )
+                            }
+                          />
+                          <em>mm</em>
+                        </div>
+                      </label>
+                    ))}
+                    <h4>Größe des Schnitts</h4>
+                    {(['X', 'Y', 'Z'] as const).map((axis, index) => (
+                      <label
+                        className="number-field compact"
+                        key={`size-${axis}`}
+                      >
+                        <span>{axis}</span>
+                        <div>
+                          <input
+                            type="number"
+                            min="0.1"
+                            step="1"
+                            value={Number(cut.size[index].toFixed(2))}
+                            onChange={(event) =>
+                              updateCut(
+                                selectedPanel.id,
+                                cut.id,
+                                'size',
+                                index as 0 | 1 | 2,
+                                Number(event.target.value),
+                              )
+                            }
+                          />
+                          <em>mm</em>
+                        </div>
+                      </label>
+                    ))}
+                  </>
+                )}
+              </details>
+            )
+          })}
         </SidebarAccordion>
       )}
       {selectedPanel && selectedPanel.booleanModifiers.length > 0 && (

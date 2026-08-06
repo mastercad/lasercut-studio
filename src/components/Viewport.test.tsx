@@ -35,6 +35,7 @@ vi.mock('@react-three/fiber', () => ({
 }))
 
 vi.mock('@react-three/drei', () => ({
+  Edges: () => <i data-testid="preview-edges" />,
   Environment: () => null,
   Grid: () => null,
   GizmoHelper: ({ children }: { children: React.ReactNode }) => <>{children}</>,
@@ -680,7 +681,8 @@ describe('Viewport 3D overlays', () => {
     const view = render(<JointPreviewOverlay />)
     expect(view.container.querySelectorAll('boxGeometry')).toHaveLength(2)
     act(() => useEditor.getState().setJointPreview(null))
-    expect(view.container).toBeEmptyDOMElement()
+    expect(view.container.querySelectorAll('mesh')).toHaveLength(0)
+    expect(view.container.querySelectorAll('boxGeometry')).toHaveLength(0)
   })
 
   it('renders and switches complete face and edge contour selection overlays', () => {

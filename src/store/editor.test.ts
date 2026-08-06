@@ -29,6 +29,7 @@ beforeEach(() => {
     selectedTextId: null,
     fingerJoints: [],
     crossJoints: [],
+    socketPatterns: [],
     laserTexts: [],
     exportLayers: createDefaultExportLayers(defaultMaterials),
     laserCutters: defaultLaserCutters,
@@ -48,6 +49,7 @@ beforeEach(() => {
     snapEnabled: false,
     transformGridEnabled: false,
   })
+  useEditor.setState({ isDirty: false })
 })
 
 describe('editor object operations', () => {
@@ -164,6 +166,12 @@ describe('editor object operations', () => {
     expect(useEditor.getState().panels).toEqual([])
     expect(useEditor.getState().groups).toEqual([])
     expect(useEditor.getState().canUndo).toBe(false)
+    const emptyAutosave = JSON.parse(
+      localStorage.getItem('lasercut-studio.project.v1')!,
+    )
+    expect(emptyAutosave.current.panels).toEqual([])
+    expect(emptyAutosave.current.groups).toEqual([])
+    expect(emptyAutosave.history).toEqual({ past: [], future: [] })
     useEditor.getState().undo()
     expect(useEditor.getState().panels).toEqual([])
     useEditor.getState().newProject('box')
@@ -171,71 +179,257 @@ describe('editor object operations', () => {
     expect(useEditor.getState().groups).toHaveLength(1)
     expect(useEditor.getState().selectedPanels).toEqual([])
   })
+  it('tracks unsaved project changes and resets dirty only on save, load or new project', () => {
+    useEditor.getState().newProject('empty')
+    expect(useEditor.getState().isDirty).toBe(false)
+    useEditor.getState().addShape('rectangle')
+    expect(useEditor.getState().isDirty).toBe(true)
+
+    const saved = useEditor.getState().serializeProject()
+    expect(JSON.parse(saved).current.isDirty).toBe(false)
+    expect(useEditor.getState().isDirty).toBe(true)
+    useEditor.getState().markProjectSaved()
+    expect(useEditor.getState().isDirty).toBe(false)
+
+    useEditor.getState().movePanel(useEditor.getState().panels[0].id, [5, 0, 0])
+    expect(useEditor.getState().isDirty).toBe(true)
+    expect(useEditor.getState().loadProject(saved)).toBe(true)
+    expect(useEditor.getState().isDirty).toBe(false)
+    useEditor.getState().addShape('circle')
+    useEditor.getState().newProject('empty')
+    expect(useEditor.getState().isDirty).toBe(false)
+  })
+  it('creates editable free socket rows and keeps copies and mirrors linked', () => {
+    useEditor.setState({ selectedPanels: ['front'], isDirty: false })
+    useEditor.getState().createSocketPattern({
+      count: 3,
+      span: 40,
+      slotLength: 18,
+      targetThickness: 5,
+      clearance: 0.2,
+    })
+    let state = useEditor.getState()
+    const pattern = state.socketPatterns[0]
+    expect(pattern).toMatchObject({
+      panelId: 'front',
+      socketType: 'cross',
+      entrySide: 'positive',
+      depthRatio: 0.5,
+      span: 40,
+      slotLength: 18,
+      slotWidth: 5.2,
+    })
+    expect(pattern.instances.map((instance) => instance.basePosition)).toEqual([
+      -20, 0, 20,
+    ])
+    expect(
+      state.panels
+        .find((panel) => panel.id === 'front')!
+        .cuts.filter((cut) => cut.socketPatternId === pattern.id)
+        .map((cut) => cut.center[pattern.distributionAxis]),
+    ).toEqual([-20, 0, 20])
+    useEditor.getState().undo()
+    expect(useEditor.getState().socketPatterns).toEqual([])
+    expect(
+      useEditor
+        .getState()
+        .panels.find((panel) => panel.id === 'front')!
+        .cuts.some((cut) => cut.socketPatternId === pattern.id),
+    ).toBe(false)
+    useEditor.getState().redo()
+    expect(useEditor.getState().socketPatterns).toHaveLength(1)
+
+    const middle = pattern.instances[1]
+    useEditor
+      .getState()
+      .updateSocketInstance(pattern.id, middle.id, { offset: 7 })
+    const first = pattern.instances[0]
+    useEditor
+      .getState()
+      .updateSocketInstance(pattern.id, first.id, { deleted: true })
+    state = useEditor.getState()
+    expect(
+      state.panels
+        .find((panel) => panel.id === 'front')!
+        .cuts.filter((cut) => cut.socketPatternId === pattern.id)
+        .map((cut) => cut.center[pattern.distributionAxis]),
+    ).toEqual([7, 20])
+
+    useEditor.getState().transferSocketPattern(pattern.id, 'back', 'mirror')
+    state = useEditor.getState()
+    const mirrored = state.socketPatterns.at(-1)!
+    expect(mirrored).toMatchObject({
+      panelId: 'back',
+      sourcePatternId: pattern.id,
+      transferMode: 'mirror',
+    })
+    expect(mirrored.instances.map((instance) => instance.basePosition)).toEqual(
+      [20, 0, -20],
+    )
+    expect(mirrored.instances[1].offset).toBe(-7)
+    const patternCount = state.socketPatterns.length
+    useEditor.getState().transferSocketPattern(pattern.id, 'back', 'copy')
+    expect(useEditor.getState().socketPatterns).toHaveLength(patternCount)
+    useEditor.getState().transferSocketPattern(mirrored.id, 'back', 'copy')
+    expect(useEditor.getState().socketPatterns).toHaveLength(patternCount)
+    useEditor.getState().movePanel('left', [100, 0, 0])
+    expect(useEditor.getState().socketPatterns).toHaveLength(patternCount)
+    useEditor
+      .getState()
+      .updateSocketInstance(pattern.id, middle.id, { offset: 2 })
+    expect(
+      useEditor.getState().socketPatterns.at(-1)!.instances[1].offset,
+    ).toBe(-2)
+    const linkedMirror = useEditor.getState().socketPatterns.at(-1)!
+    useEditor
+      .getState()
+      .updateSocketInstance(linkedMirror.id, linkedMirror.instances[2].id, {
+        offset: 4,
+        deleted: true,
+      })
+    state = useEditor.getState()
+    expect(state.socketPatterns[0].instances[2]).toMatchObject({
+      offset: -4,
+      deleted: true,
+    })
+    expect(state.socketPatterns.at(-1)!.instances[2]).toMatchObject({
+      offset: 4,
+      deleted: true,
+    })
+    expect(
+      state.panels
+        .find((panel) => panel.id === 'front')!
+        .cuts.filter((cut) => cut.socketPatternId === pattern.id),
+    ).toHaveLength(1)
+    expect(
+      state.panels
+        .find((panel) => panel.id === 'back')!
+        .cuts.filter((cut) => cut.socketPatternId === linkedMirror.id),
+    ).toHaveLength(1)
+
+    const serialized = useEditor.getState().serializeProject()
+    expect(useEditor.getState().loadProject(serialized)).toBe(true)
+    expect(useEditor.getState().socketPatterns).toHaveLength(2)
+    expect(useEditor.getState().isDirty).toBe(false)
+    useEditor.getState().removeSocketPattern(pattern.id)
+    expect(
+      useEditor
+        .getState()
+        .panels.find((panel) => panel.id === 'front')!
+        .cuts.some((cut) => cut.socketPatternId === pattern.id),
+    ).toBe(false)
+  })
   it('imports SVG contours as material-aware groups and undoes the import atomically', () => {
     const beforeCount = useEditor.getState().panels.length
-    useEditor.getState().importSvgObjects('Schild', [
-      {
-        name: 'Außenring',
-        groupName: 'Front',
-        materialId: 'acrylic-3',
-        faces: [
-          {
-            id: 'face',
-            outer: [
-              [0, 0],
-              [60, 0],
-              [60, 30],
-              [0, 30],
-            ],
-            holes: [
-              [
-                [10, 10],
-                [10, 20],
-                [20, 20],
-                [20, 10],
+    const beforeProfileCount = useEditor.getState().processingProfiles.length
+    const beforeRecipeCount = useEditor.getState().processingRecipes.length
+    useEditor.getState().importSvgObjects(
+      'Schild',
+      [
+        {
+          name: 'Außenring',
+          groupName: 'Front',
+          materialId: 'acrylic-3',
+          sourceCutIndex: 0,
+          faces: [
+            {
+              id: 'face',
+              outer: [
+                [0, 0],
+                [60, 0],
+                [60, 30],
+                [0, 30],
               ],
-            ],
-          },
-        ],
-        attachedOperations: [
-          {
-            id: 'engraving',
-            name: 'Seriennummer',
-            operation: 'Scan',
-            shapeType: 'Text',
-            faces: [
-              {
-                id: 'engraving-face',
-                outer: [
-                  [25, 12],
-                  [35, 12],
-                  [35, 18],
-                  [25, 18],
+              holes: [
+                [
+                  [10, 10],
+                  [10, 20],
+                  [20, 20],
+                  [20, 10],
                 ],
-                holes: [],
-              },
-            ],
-          },
-        ],
-      },
-      {
-        name: 'Einleger',
-        groupName: 'Dekor',
-        materialId: 'birch-5',
-        faces: [
-          {
-            id: 'face',
-            outer: [
-              [70, 0],
-              [90, 0],
-              [90, 20],
-              [70, 20],
-            ],
-            holes: [],
-          },
-        ],
-      },
-    ])
+              ],
+            },
+          ],
+          attachedOperations: [
+            {
+              id: 'engraving',
+              name: 'Seriennummer',
+              operation: 'Scan',
+              shapeType: 'Text',
+              sourceCutIndex: 14,
+              faces: [
+                {
+                  id: 'engraving-face',
+                  outer: [
+                    [25, 12],
+                    [35, 12],
+                    [35, 18],
+                    [25, 18],
+                  ],
+                  holes: [],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          name: 'Einleger',
+          groupName: 'Dekor',
+          materialId: 'birch-5',
+          sourceCutIndex: 2,
+          faces: [
+            {
+              id: 'face',
+              outer: [
+                [10, 0],
+                [30, 0],
+                [30, 20],
+                [10, 20],
+              ],
+              holes: [],
+            },
+          ],
+        },
+      ],
+      [
+        {
+          index: 0,
+          name: 'Outer Cut',
+          type: 'Cut',
+          speed: 400,
+          minPower: 12,
+          maxPower: 100,
+          passes: 1,
+          interval: 0.01,
+          priority: 0,
+          color: '#000000',
+        },
+        {
+          index: 2,
+          name: 'Detail Cut',
+          type: 'Cut',
+          speed: 2000,
+          minPower: 12,
+          maxPower: 30,
+          passes: 2,
+          interval: 0.03,
+          priority: 1,
+          color: '#ff0000',
+        },
+        {
+          index: 14,
+          name: 'Engraving',
+          type: 'Scan',
+          speed: 300,
+          minPower: 12,
+          maxPower: 80,
+          passes: 200,
+          interval: 0.03,
+          priority: 2,
+          color: '#ff7f00',
+        },
+      ],
+    )
     const imported = useEditor.getState().panels.slice(beforeCount)
     expect(imported).toHaveLength(2)
     expect(
@@ -244,8 +438,14 @@ describe('editor object operations', () => {
       ['Außenring', 'acrylic-3', 3],
       ['Einleger', 'birch-5', 5],
     ])
-    expect(imported[0].position).toEqual([-15, 0, 0])
-    expect(imported[1].position).toEqual([35, -5, 0])
+    expect(imported[0].position).toEqual([0, 15, 0])
+    expect(imported[1].position).toEqual([-20, -20, 0])
+    const overlaps =
+      Math.abs(imported[0].position[0] - imported[1].position[0]) <
+        (imported[0].size[0] + imported[1].size[0]) / 2 &&
+      Math.abs(imported[0].position[1] - imported[1].position[1]) <
+        (imported[0].size[1] + imported[1].size[1]) / 2
+    expect(overlaps).toBe(false)
     expect(imported[0].rotation).toEqual([0, 0, 0])
     expect(imported[1].rotation).toEqual([0, 0, 0])
     expect(imported[0].importedOperations?.[0]).toMatchObject({
@@ -262,6 +462,38 @@ describe('editor object operations', () => {
           ],
         },
       ],
+    })
+    const importedProfiles = useEditor
+      .getState()
+      .processingProfiles.slice(beforeProfileCount)
+    expect(
+      importedProfiles.map((profile) => [profile.name, profile.geometry]),
+    ).toEqual([
+      ['Outer Cut', 'contour'],
+      ['Detail Cut', 'contour'],
+      ['Engraving', 'fill'],
+    ])
+    expect(imported[0].autoCut).toBe(false)
+    expect(imported[0].processingAssignments).toHaveLength(2)
+    expect(imported[0].processingAssignments?.[0].faces).toHaveLength(1)
+    expect(imported[0].processingAssignments?.[1].faces).toBeUndefined()
+    const importedRecipes = useEditor
+      .getState()
+      .processingRecipes.slice(beforeRecipeCount)
+    expect(importedRecipes).toHaveLength(3)
+    expect(
+      importedRecipes.find(
+        (recipe) =>
+          recipe.profileId === importedProfiles[2].id &&
+          recipe.materialId === 'acrylic-3',
+      ),
+    ).toMatchObject({
+      laserId: useEditor.getState().activeLaserId,
+      speed: 300,
+      power: 80,
+      passes: 200,
+      lineInterval: 0.03,
+      layerColor: '#ff7f00',
     })
     expect(
       imported[0].shape?.type === 'free'
@@ -283,6 +515,78 @@ describe('editor object operations', () => {
     expect(useEditor.getState().selectedGroupId).toBeNull()
     useEditor.getState().undo()
     expect(useEditor.getState().panels).toHaveLength(beforeCount)
+    expect(useEditor.getState().processingProfiles).toHaveLength(
+      beforeProfileCount,
+    )
+    expect(useEditor.getState().processingRecipes).toHaveLength(
+      beforeRecipeCount,
+    )
+  })
+  it('reuses matching LightBurn profiles and recipes across repeated imports', () => {
+    const object = {
+      name: 'Teil',
+      groupName: 'Import',
+      materialId: 'birch-3',
+      sourceCutIndex: 14,
+      faces: [
+        {
+          id: 'face',
+          outer: [
+            [0, 0],
+            [20, 0],
+            [20, 10],
+            [0, 10],
+          ] as [number, number][],
+          holes: [],
+        },
+      ],
+    }
+    const setting = {
+      index: 14,
+      name: 'Feine Gravur',
+      type: 'Scan',
+      speed: 300,
+      minPower: 10,
+      maxPower: 25,
+      passes: 1,
+      interval: 0.08,
+      priority: 0,
+      color: '#ff7f00',
+    }
+    useEditor.getState().importSvgObjects('Erster Import', [object], [setting])
+    const profileCount = useEditor.getState().processingProfiles.length
+    const recipeCount = useEditor.getState().processingRecipes.length
+    const profileId = useEditor.getState().panels.at(-1)!
+      .processingAssignments![0].profileId
+
+    useEditor.getState().importSvgObjects('Zweiter Import', [object], [setting])
+    expect(useEditor.getState().processingProfiles).toHaveLength(profileCount)
+    expect(useEditor.getState().processingRecipes).toHaveLength(recipeCount)
+    expect(
+      useEditor.getState().panels.at(-1)!.processingAssignments![0].profileId,
+    ).toBe(profileId)
+
+    useEditor
+      .getState()
+      .importSvgObjects(
+        'Abweichender Import',
+        [object],
+        [{ ...setting, speed: 999, maxPower: 77 }],
+      )
+    expect(useEditor.getState().processingProfiles).toHaveLength(profileCount)
+    expect(useEditor.getState().processingRecipes).toHaveLength(recipeCount)
+    expect(
+      useEditor
+        .getState()
+        .processingRecipes.find(
+          (recipe) =>
+            recipe.profileId === profileId &&
+            recipe.materialId === object.materialId,
+        ),
+    ).toMatchObject({ speed: 300, power: 25 })
+    expect(useEditor.getState().operationMessage).toContain(
+      'abweichende LightBurn-Rezept',
+    )
   })
   it('rotates and uniformly scales a group while preserving material thickness', () => {
     useEditor.setState({
@@ -1098,6 +1402,73 @@ describe('editor object operations', () => {
     expect(useEditor.getState().loadProject('{"wrong":true}')).toBe(false)
     expect(useEditor.getState().panels).toBe(panels)
   })
+  it('removes orphaned library references and legacy duplicated import contours while loading', () => {
+    const document = JSON.parse(useEditor.getState().serializeProject())
+    const profileId = 'imported-scan-profile'
+    document.current.processingProfiles.push({
+      id: profileId,
+      name: 'Imported scan',
+      geometry: 'fill',
+      color: '#ff00ff',
+      order: 99,
+    })
+    document.current.processingRecipes.push({
+      id: 'orphan-recipe',
+      profileId: 'missing-profile',
+      laserId: document.current.laserCutters[0].id,
+      materialId: document.current.materials[0].id,
+      speed: 100,
+      power: 20,
+      passes: 1,
+      airAssist: false,
+      lineInterval: 0.1,
+      focusOffset: 0,
+      layerColor: '#000000',
+    })
+    const duplicatedFace = {
+      id: 'scan-face',
+      outer: [
+        [0, 0],
+        [2, 0],
+        [2, 2],
+        [0, 2],
+      ],
+      holes: [],
+    }
+    document.current.panels[0].importedOperations = [
+      {
+        id: 'scan',
+        name: 'Scan',
+        operation: 'Scan',
+        profileId,
+        faces: [duplicatedFace],
+      },
+    ]
+    document.current.panels[0].processingAssignments = [
+      {
+        id: 'assignment',
+        profileId,
+        geometry: 'fill',
+        sourceOperation: 'Scan',
+        faces: [duplicatedFace],
+      },
+    ]
+
+    expect(useEditor.getState().loadProject(JSON.stringify(document))).toBe(
+      true,
+    )
+    expect(
+      useEditor
+        .getState()
+        .processingRecipes.some((recipe) => recipe.id === 'orphan-recipe'),
+    ).toBe(false)
+    expect(
+      useEditor.getState().panels[0].processingAssignments?.[0].faces,
+    ).toBeUndefined()
+    expect(
+      useEditor.getState().panels[0].importedOperations?.[0].faces,
+    ).toEqual([duplicatedFace])
+  })
 
   it('migrates legacy project defaults, processing recipes, text engravings and off-center SVG pivots', () => {
     const document = JSON.parse(useEditor.getState().serializeProject())
@@ -1171,9 +1542,9 @@ describe('editor object operations', () => {
     expect(state.exportLayers.length).toBeGreaterThan(0)
     expect(state.laserCutters).toEqual(defaultLaserCutters)
     expect(state.activeLaserId).toBe(defaultLaserCutters[0].id)
-    expect(state.processingProfiles).toEqual([
+    expect(state.processingProfiles).toContainEqual(
       expect.objectContaining({ id: 'legacy-profile', geometry: 'fill' }),
-    ])
+    )
     expect(state.processingRecipes[0]).toMatchObject({
       profileId: 'legacy-profile',
       layerColor: '#123456',

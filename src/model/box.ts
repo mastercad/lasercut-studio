@@ -12,6 +12,33 @@ export type CutOperation = {
   center: [number, number, number]
   size: [number, number, number]
   jointId?: string
+  socketPatternId?: string
+  socketInstanceId?: string
+}
+
+export type SocketInstance = {
+  id: string
+  basePosition: number
+  offset: number
+  deleted?: boolean
+}
+
+export type SocketPattern = {
+  id: string
+  panelId: string
+  name: string
+  distributionAxis: 0 | 1 | 2
+  slotAxis: 0 | 1 | 2
+  center: [number, number, number]
+  span: number
+  slotLength: number
+  slotWidth: number
+  socketType?: 'through' | 'cross'
+  entrySide?: 'negative' | 'positive'
+  depthRatio?: number
+  instances: SocketInstance[]
+  sourcePatternId?: string
+  transferMode?: 'copy' | 'mirror'
 }
 
 export type BooleanOperation =
@@ -144,6 +171,9 @@ export type PanelDefinition = {
     id: string
     profileId: string
     geometry: 'fill' | 'contour'
+    /** Optional source contours when a profile applies to only part of a panel. */
+    faces?: ContourFace[]
+    sourceOperation?: string
   }[]
   /** Operations retained from an imported source file, such as engraving or text. */
   importedOperations?: {
@@ -151,6 +181,7 @@ export type PanelDefinition = {
     name: string
     operation: string
     shapeType?: string
+    profileId?: string
     faces: ContourFace[]
   }[]
 }

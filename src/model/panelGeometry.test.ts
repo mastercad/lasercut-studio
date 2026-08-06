@@ -76,6 +76,40 @@ describe('CSG panel geometry', () => {
     withoutRelief.dispose()
   })
 
+  it('renders an edited rectangle from its live contour instead of its old size', () => {
+    const panel: PanelDefinition = {
+      id: 'edited-rectangle',
+      label: 'Edited rectangle',
+      size: [20, 10, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      shape: {
+        type: 'rectangle',
+        editedFaces: [
+          {
+            id: 'face-0',
+            outer: [
+              [-10, -5],
+              [20, -5],
+              [20, 5],
+              [-10, 5],
+            ],
+            holes: [],
+          },
+        ],
+      },
+    }
+    const geometry = createEditorPanelGeometry(panel, [panel])
+    geometry.computeBoundingBox()
+    expect(geometry.boundingBox?.min.x).toBeCloseTo(-10)
+    expect(geometry.boundingBox?.max.x).toBeCloseTo(20)
+    geometry.dispose()
+  })
+
   it.each([
     { type: 'triangle' as const },
     { type: 'circle' as const, segments: 48 },
@@ -259,7 +293,7 @@ describe('CSG panel geometry', () => {
     geometry.dispose()
   })
 
-  it('retains imported engraving and cut-text operations in the panel geometry', () => {
+  it('retains imported cut-text operations in the panel geometry', () => {
     const operationFace = {
       id: 'operation-face',
       outer: [
@@ -282,9 +316,9 @@ describe('CSG panel geometry', () => {
       hidden: false,
       importedOperations: [
         {
-          id: 'engraving',
+          id: 'cut-text',
           name: 'Label',
-          operation: 'Scan',
+          operation: 'Cut',
           shapeType: 'Text',
           faces: [operationFace],
         },
@@ -299,6 +333,45 @@ describe('CSG panel geometry', () => {
       panelGeometryKey({ ...panel, importedOperations: [] }, [panel]),
     )
     engraved.dispose()
+    plain.dispose()
+  })
+
+  it('retains scan contours as processing data without solid CSG', () => {
+    const scan = {
+      id: 'scan',
+      name: 'Engraving',
+      operation: 'Scan',
+      faces: [
+        {
+          id: 'scan-face',
+          outer: [
+            [-5, -5],
+            [5, -5],
+            [5, 5],
+            [-5, 5],
+          ] as [number, number][],
+          holes: [],
+        },
+      ],
+    }
+    const panel: PanelDefinition = {
+      id: 'scan-panel',
+      label: 'Scan panel',
+      size: [80, 60, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      importedOperations: [scan],
+    }
+    const scanned = createPanelGeometry(panel)
+    const plain = createPanelGeometry({ ...panel, importedOperations: [] })
+    expect(scanned.getAttribute('position').count).toBe(
+      plain.getAttribute('position').count,
+    )
+    scanned.dispose()
     plain.dispose()
   })
 

@@ -2,6 +2,9 @@
 
 :root {
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  --ui-font-control: 11px;
+  --ui-font-action: 10px;
+  --ui-font-label: 9px;
   color: #edf0f4;
   background: #111316;
   font-synthesis: none;
@@ -1271,12 +1274,19 @@ button {
   background: #202328;
   color: #cbd0d7;
 }
+.properties-panel.socket-wizard-open {
+  overflow: hidden;
+}
+.properties-panel.socket-wizard-open > :not(.socket-sidebar) {
+  display: none !important;
+}
 .scene-panel {
   border-right: 1px solid #33373d;
   display: flex;
   flex-direction: column;
 }
 .properties-panel {
+  position: relative;
   border-left: 1px solid #33373d;
   overflow-y: auto;
 }
@@ -2344,6 +2354,7 @@ button {
   background: #181b1f;
   color: #edf0f4;
   padding: 7px 32px 7px 9px;
+  font-size: var(--ui-font-control);
 }
 .number-field input:focus,
 .select-field select:focus,
@@ -3241,6 +3252,450 @@ button {
   grid-template-columns: 16px 1fr;
   align-items: center;
 }
+.socket-patterns details {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px;
+}
+.socket-patterns summary,
+.socket-instance,
+.socket-patterns .button-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.socket-patterns summary span,
+.socket-instance > span {
+  flex: 1;
+}
+.socket-instance {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+.socket-instance .number-field {
+  min-width: 130px;
+}
+.socket-patterns .button-row button {
+  flex: 1;
+}
+.socket-dialog {
+  width: min(860px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #3a414a;
+  border-radius: 10px;
+  background: #202328;
+  color: #dce1e7;
+  box-shadow: 0 22px 70px #000a;
+}
+.socket-sidebar {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.socket-sidebar > header {
+  padding: 12px;
+}
+.socket-sidebar .socket-dialog-body {
+  padding: 12px;
+}
+.socket-sidebar .socket-type-fields,
+.socket-sidebar .profile-parameter-grid {
+  grid-template-columns: 1fr;
+}
+.socket-sidebar .select-field {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+.socket-sidebar .socket-new-section {
+  padding: 10px;
+}
+.socket-sidebar .socket-apply-draft {
+  min-height: 34px;
+  margin: 0;
+}
+.socket-sidebar .socket-instance {
+  grid-template-columns: minmax(0, 1fr) 92px;
+}
+.socket-sidebar .socket-instance > button {
+  grid-column: auto;
+}
+.socket-sidebar .socket-transfer {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.socket-sidebar .socket-transfer strong {
+  grid-column: 1 / -1;
+  color: #aeb5bd;
+  font-size: var(--ui-font-action);
+}
+.socket-sidebar .socket-transfer select {
+  grid-column: 1 / -1;
+}
+.socket-target-control {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+}
+.socket-sidebar .socket-transfer .socket-target-control select {
+  grid-column: auto;
+}
+.socket-target-control .socket-pick-target {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  place-items: center;
+}
+.socket-target-control .socket-pick-target svg {
+  width: 15px;
+  height: 15px;
+}
+.socket-target-control .socket-pick-target.active {
+  border-color: #ff7b42;
+  background: #3b2b23;
+  color: #ff9a67;
+}
+.panel-pick-active .viewport canvas {
+  cursor: crosshair !important;
+}
+.socket-dialog > header,
+.socket-dialog > footer,
+.socket-pattern-card > header,
+.socket-transfer {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.socket-dialog > header {
+  padding: 18px 20px;
+  background: #202328;
+}
+.socket-dialog > header > button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #929aa4;
+  cursor: pointer;
+}
+.socket-dialog > header > button:hover {
+  background: #343940;
+  color: white;
+}
+.socket-dialog > header svg {
+  width: 16px;
+  height: 16px;
+}
+.socket-dialog > header,
+.socket-dialog > footer {
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #343a42;
+}
+.socket-dialog > footer {
+  justify-content: flex-end;
+  border-top: 1px solid #343a42;
+  border-bottom: 0;
+}
+.socket-dialog h2,
+.socket-dialog p {
+  margin: 0;
+}
+.socket-dialog h2 {
+  color: white;
+  font-size: 17px;
+}
+.socket-dialog > header p {
+  margin-top: 5px;
+  color: #89919b;
+  font-size: 10px;
+}
+.socket-dialog-body {
+  overflow: auto;
+  padding: 16px 18px;
+}
+.socket-dialog-body > h3 {
+  margin: 0 0 14px;
+  color: white;
+  font-size: 14px;
+}
+.socket-dialog .profile-parameter-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 12px;
+}
+.socket-type-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.socket-dialog .socket-type-fields .select-field {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  margin: 0;
+}
+.socket-dialog .profile-parameter-grid label,
+.socket-dialog .select-field {
+  display: grid;
+  gap: 6px;
+  color: #929aa5;
+  font-size: 9px;
+}
+.socket-dialog-body > .socket-new-section > .select-field {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+.socket-new-section {
+  padding: 13px;
+  border: 1px solid #3b424a;
+  border-radius: 8px;
+  background: #1b1e22;
+}
+.socket-new-section > header,
+.socket-existing-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 13px;
+}
+.socket-new-section > header div,
+.socket-existing-heading {
+  gap: 4px;
+}
+.socket-new-section > header strong,
+.socket-existing-heading strong {
+  color: #f2f4f6;
+  font-size: 11px;
+}
+.socket-new-section > header small,
+.socket-existing-heading small {
+  color: #858e98;
+  font-size: 9px;
+}
+.socket-new-section > header div {
+  display: grid;
+}
+.socket-existing-heading {
+  margin: 18px 0 8px;
+}
+.socket-existing-heading small {
+  margin-left: auto;
+}
+.socket-dialog input,
+.socket-dialog select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid #454b53;
+  border-radius: 6px;
+  outline: 0;
+  background: #262a2f;
+  color: #edf0f3;
+  font-family: inherit;
+  font-size: var(--ui-font-control);
+  font-weight: 400;
+}
+.socket-dialog input:focus,
+.socket-dialog select:focus {
+  border-color: #ff7b42;
+  box-shadow: 0 0 0 2px #ff7b4220;
+}
+.socket-dialog .select-field {
+  grid-template-columns: minmax(150px, 1fr) minmax(220px, 1fr);
+  align-items: center;
+  margin-bottom: 12px;
+}
+.socket-dialog .apply-joint {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid #8b563b;
+  border-radius: 7px;
+  background: #382b25;
+  color: #ffae7c;
+  font-weight: 700;
+  cursor: pointer;
+}
+.socket-preview-button {
+  max-width: 220px;
+  margin-left: auto;
+  display: block;
+}
+.socket-dialog .apply-joint:hover {
+  border-color: #ff7b42;
+  background: #493126;
+  color: white;
+}
+.socket-dialog-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+.socket-pattern-card {
+  padding: 10px;
+  border: 1px solid #3b424a;
+  border-radius: 7px;
+  background: #1b1e22;
+}
+.socket-pattern-card > header strong {
+  flex: 1;
+  color: #f0f2f4;
+  font-size: 11px;
+}
+.socket-pattern-card > header > span {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.socket-pattern-card > header > span small {
+  color: #7f8892;
+  font-size: var(--ui-font-label);
+}
+.socket-pattern-card button,
+.socket-dialog > footer > button:not(.export-button) {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #484e56;
+  border-radius: 6px;
+  background: #292d32;
+  color: #c5cbd2;
+  cursor: pointer;
+  font-size: var(--ui-font-action);
+}
+.socket-instance-details {
+  margin-top: 9px;
+  border-top: 1px solid #343a42;
+}
+.socket-instance-details > summary {
+  padding: 9px 0 2px;
+  color: #aeb5bd;
+  cursor: pointer;
+  font-size: var(--ui-font-action);
+}
+.socket-sidebar .socket-instance-details input,
+.socket-sidebar .socket-instance-details button {
+  font-size: var(--ui-font-action);
+}
+.socket-pattern-card button:hover,
+.socket-dialog > footer > button:not(.export-button):hover {
+  border-color: #626a74;
+  background: #343940;
+  color: white;
+}
+.socket-pattern-card .socket-remove-row {
+  min-height: 26px;
+  border-color: transparent;
+  background: transparent;
+  color: #d78383;
+  font-size: 9px;
+}
+.socket-pattern-card .socket-remove-row:hover {
+  border-color: #6c3c40;
+  background: #35262a;
+  color: #ff9a9f;
+}
+.socket-remove-row svg {
+  width: 12px;
+  vertical-align: -2px;
+}
+.socket-instance {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) 140px auto auto;
+  align-items: center;
+  gap: 8px;
+}
+.socket-instance > span {
+  color: #aeb5bd;
+  font-size: 10px;
+}
+.socket-instance > span small {
+  display: block;
+  margin-top: 2px;
+  color: #7f8892;
+  font-size: 8px;
+}
+.socket-instance.deleted {
+  opacity: 0.66;
+}
+.socket-instance.deleted > span small {
+  color: #d79a70;
+}
+.socket-position-input {
+  position: relative;
+}
+.socket-position-input input {
+  padding-right: 30px;
+}
+.socket-position-input em {
+  position: absolute;
+  right: 9px;
+  top: 9px;
+  color: #77808a;
+  font: normal 9px sans-serif;
+}
+.socket-instance output {
+  color: #ffb17c;
+  font-size: 10px;
+  text-align: right;
+}
+.socket-transfer {
+  margin-top: 10px;
+}
+.socket-transfer select {
+  flex: 1;
+}
+.socket-transfer button:disabled,
+.socket-dialog > footer .export-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.socket-draft {
+  margin-top: 10px;
+  border-color: #765039;
+  background: #28231f;
+}
+.socket-draft > small {
+  display: block;
+  margin-top: 9px;
+  color: #9d8b7e;
+  font-size: 9px;
+}
+.socket-apply-draft {
+  margin: 11px 0 0 auto;
+  display: block;
+}
+.socket-empty-state {
+  padding: 18px;
+  border: 1px dashed #3c434b;
+  border-radius: 7px;
+  color: #7f8892;
+  font-size: 9px;
+  text-align: center;
+}
+.socket-dialog > footer {
+  gap: 8px;
+  background: #1b1e22;
+}
 .profile-check input {
   width: 15px;
 }
@@ -3993,12 +4448,17 @@ button {
   border: 1px solid #41464e;
   background: #292d32;
   color: #b8bec6;
+  font-size: var(--ui-font-action);
 }
 .delete-button:hover:not(:disabled) {
   background: #452b2d;
 }
-.secondary-button:hover {
+.secondary-button:hover:not(:disabled) {
   background: #343941;
+}
+.secondary-button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .delete-button:disabled {
   opacity: 0.35;

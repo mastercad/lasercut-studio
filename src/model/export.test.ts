@@ -538,6 +538,83 @@ describe('LightBurn export', () => {
     )
   })
 
+  it('exports only the source contours assigned to an imported LightBurn profile', () => {
+    const material = defaultMaterials[0]
+    const profile = {
+      id: 'lightburn-c14',
+      name: 'LightBurn C14',
+      geometry: 'contour' as const,
+      color: '#ff7f00',
+      order: 0,
+    }
+    const panel: PanelDefinition = {
+      id: 'imported-panel',
+      label: 'Imported panel',
+      size: [80, 60, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      materialId: material.id,
+      autoCut: false,
+      processingAssignments: [
+        {
+          id: 'assignment',
+          profileId: profile.id,
+          geometry: 'contour',
+          faces: [
+            {
+              id: 'engraving',
+              outer: [
+                [-5, -3],
+                [5, -3],
+                [5, 3],
+                [-5, 3],
+              ],
+              holes: [],
+            },
+          ],
+        },
+      ],
+    }
+    const recipe = {
+      id: 'recipe',
+      profileId: profile.id,
+      laserId: defaultLaserCutters[0].id,
+      materialId: material.id,
+      speed: 300,
+      power: 80,
+      passes: 2,
+      airAssist: false,
+      lineInterval: 0.03,
+      focusOffset: 0,
+      layerColor: '#ff7f00',
+    }
+    const steps = buildProjectExportSteps(
+      material,
+      [panel],
+      [profile],
+      [recipe],
+      defaultLaserCutters[0].id,
+    )
+    expect(steps).toHaveLength(1)
+    expect(steps[0]).toMatchObject({ contourCount: 1, speed: 300, power: 80 })
+    const svg = createProfiledMaterialSvg(
+      material,
+      [panel],
+      [panel],
+      [profile],
+      [recipe],
+      defaultLaserCutters[0].id,
+    )
+    expect(svg).toContain(
+      'M 5.000,7.000 L 15.000,7.000 L 15.000,13.000 L 5.000,13.000 Z',
+    )
+    expect(svg).not.toContain('M 10.000,10.000 L 90.000,10.000')
+  })
+
   it('keeps inner and outer cuts as separate configurable LightBurn layers', () => {
     const material = defaultMaterials[0]
     const profiles = createDefaultProcessingProfiles()

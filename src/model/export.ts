@@ -21,6 +21,7 @@ export type ExportLayerDefinition = {
   mode: ExportMode
   speed: number
   power: number
+  minPower?: number
   passes: number
   airAssist: boolean
   output: boolean
@@ -40,6 +41,7 @@ export type LaserPreset = {
   operation: ExportOperation
   speed: number
   power: number
+  minPower?: number
   passes: number
   airAssist: boolean
   mode: ExportMode
@@ -52,6 +54,13 @@ export type ProcessingProfile = {
   referenceDepth?: number
   color: string
   order: number
+  source?: {
+    format: 'lightburn'
+    deviceName: string
+    cutIndex: number
+    operation: string
+    fingerprint?: string
+  }
 }
 export type ProcessingRecipe = {
   id: string
@@ -65,6 +74,11 @@ export type ProcessingRecipe = {
   lineInterval: number
   focusOffset: number
   layerColor: string
+  minPower?: number
+  sourceCutIndex?: number
+  sourceOperation?: string
+  output?: boolean
+  sourceParameters?: Record<string, number>
 }
 export type ExportGroupInfo = { id: string; name: string; panelIds: string[] }
 export const defaultLaserCutters: LaserCutterDefinition[] = [
@@ -566,7 +580,95 @@ function createDxf(
 
 type PackableItem = { contours: PanelContours }
 
+export type PackRectangle = {
+  width: number
+  height: number
+}
+
+/** Deterministic compact shelf layout shared by import and export. */
+export function packRectangles<T extends PackRectangle>(
+  items: T[],
+  gap = 10,
+  margin = 10,
+) {
+  if (!items.length)
+    return {
+      placed: [] as Array<T & { offset: Point }>,
+      width: margin * 2,
+      height: margin * 2,
+    }
+
+  const totalArea = items.reduce(
+    (sum, item) => sum + item.width * item.height,
+    0,
+  )
+  const widest = Math.max(...items.map((item) => item.width))
+  const targetWidth = Math.max(widest, Math.sqrt(totalArea * 1.5))
+  const sorted = items
+    .map((item, index) => ({ item, index }))
+    .sort(
+      (a, b) =>
+        b.item.height - a.item.height ||
+        b.item.width - a.item.width ||
+        a.index - b.index,
+    )
+
+  let cursorX = margin
+  let cursorY = margin
+  let rowHeight = 0
+  let usedWidth = 0
+  const placed = sorted.map(({ item }) => {
+    if (cursorX > margin && cursorX + item.width > margin + targetWidth) {
+      cursorX = margin
+      cursorY += rowHeight + gap
+      rowHeight = 0
+    }
+    const offset: Point = [cursorX, cursorY]
+    cursorX += item.width + gap
+    rowHeight = Math.max(rowHeight, item.height)
+    usedWidth = Math.max(usedWidth, cursorX - gap)
+    return { ...item, offset }
+  })
+
+  return {
+    placed,
+    width: Math.max(20, usedWidth + margin),
+    height: Math.max(20, cursorY + rowHeight + margin),
+  }
+}
+
 type ExportItem = PackableItem & { panel: PanelDefinition }
+
+const assignedProfileContours = (
+  panel: PanelDefinition,
+  fallback: PanelContours,
+  profileId?: string,
+): PanelContours => {
+  if (!profileId) return fallback
+  const faces = (panel.processingAssignments ?? [])
+    .filter((assignment) => assignment.profileId === profileId)
+    .flatMap((assignment) => assignment.faces ?? [])
+  const importedFaces = (panel.importedOperations ?? [])
+    .filter((operation) => operation.profileId === profileId)
+    .flatMap((operation) => operation.faces)
+  const assignedFaces = [...faces, ...importedFaces]
+  if (!assignedFaces.length) return fallback
+  const points = assignedFaces
+    .flatMap((face) => [face.outer, ...face.holes])
+    .flat()
+  return {
+    outer: assignedFaces.map((face) => face.outer),
+    inner: assignedFaces.flatMap((face) => face.holes),
+    width:
+      Math.max(...points.map((point) => point[0])) -
+      Math.min(...points.map((point) => point[0])),
+    height:
+      Math.max(...points.map((point) => point[1])) -
+      Math.min(...points.map((point) => point[1])),
+    minX: Math.min(...points.map((point) => point[0])),
+    maxY: Math.max(...points.map((point) => point[1])),
+  }
+}
 
 const panelQuaternion = (panel: PanelDefinition) =>
   new Quaternion().setFromEuler(new Euler(...panel.rotation, 'XYZ'))
@@ -682,48 +784,18 @@ function attachEngravingsToHosts(items: ExportItem[]) {
  * deterministic, reasonably square layout without rotating user geometry.
  */
 function packItems<T extends PackableItem>(items: T[], gap = 10, margin = 10) {
-  if (!items.length)
-    return { placed: [] as Array<T & { offset: Point }>, width: 20, height: 20 }
-
-  const totalArea = items.reduce(
-    (sum, item) => sum + item.contours.width * item.contours.height,
-    0,
+  const packed = packRectangles(
+    items.map((item) => ({
+      item,
+      width: item.contours.width,
+      height: item.contours.height,
+    })),
+    gap,
+    margin,
   )
-  const widest = Math.max(...items.map((item) => item.contours.width))
-  const targetWidth = Math.max(widest, Math.sqrt(totalArea * 1.5))
-  const sorted = items
-    .map((item, index) => ({ item, index }))
-    .sort(
-      (a, b) =>
-        b.item.contours.height - a.item.contours.height ||
-        b.item.contours.width - a.item.contours.width ||
-        a.index - b.index,
-    )
-
-  let cursorX = margin
-  let cursorY = margin
-  let rowHeight = 0
-  let usedWidth = 0
-  const placed = sorted.map(({ item }) => {
-    if (
-      cursorX > margin &&
-      cursorX + item.contours.width > margin + targetWidth
-    ) {
-      cursorX = margin
-      cursorY += rowHeight + gap
-      rowHeight = 0
-    }
-    const offset: Point = [cursorX, cursorY]
-    cursorX += item.contours.width + gap
-    rowHeight = Math.max(rowHeight, item.contours.height)
-    usedWidth = Math.max(usedWidth, cursorX - gap)
-    return { ...item, offset }
-  })
-
   return {
-    placed,
-    width: Math.max(20, usedWidth + margin),
-    height: Math.max(20, cursorY + rowHeight + margin),
+    ...packed,
+    placed: packed.placed.map(({ item, offset }) => ({ ...item, offset })),
   }
 }
 
@@ -765,6 +837,7 @@ export type ProjectExportStep = {
   mode: ExportMode
   speed: number
   power: number
+  minPower?: number
   passes: number
   airAssist: boolean
   objectIds: string[]
@@ -774,6 +847,8 @@ export type ProjectExportStep = {
   lineInterval?: number
   focusOffset?: number
   configured: boolean
+  output?: boolean
+  sourceParameters?: Record<string, number>
 }
 
 type CutPresets = { inner?: LaserPreset; outer?: LaserPreset }
@@ -830,22 +905,30 @@ export function buildProjectExportSteps(
         mode: profile.geometry === 'fill' ? 'fill' : 'line',
         speed: recipe?.speed ?? 0,
         power: recipe?.power ?? 0,
+        minPower: recipe?.minPower,
         passes: recipe?.passes ?? 0,
         airAssist: recipe?.airAssist ?? false,
         configured: Boolean(recipe),
         referenceDepth: profile.referenceDepth,
         lineInterval: recipe?.lineInterval,
         focusOffset: recipe?.focusOffset,
+        output: recipe?.output,
+        sourceParameters: recipe?.sourceParameters,
         objectIds: assigned.map(({ panel }) => panel.id),
         contourCount: assigned.reduce((sum, { panel, contours }) => {
+          const assignedContours = assignedProfileContours(
+            panel,
+            contours,
+            profile.id,
+          )
           const assignment = panel.processingAssignments?.find(
             (candidate) => candidate.profileId === profile.id,
           )
           return (
             sum +
             (assignment?.geometry === 'fill'
-              ? contours.outer.length
-              : contours.outer.length + contours.inner.length)
+              ? assignedContours.outer.length
+              : assignedContours.outer.length + assignedContours.inner.length)
           )
         }, 0),
       },
@@ -954,9 +1037,14 @@ export function createProfiledMaterialSvg(
         const assignment = item.panel.processingAssignments?.find(
           (candidate) => candidate.profileId === step.profileId,
         )
+        const contours = assignedProfileContours(
+          item.panel,
+          item.contours,
+          step.profileId,
+        )
         return assignment?.geometry === 'fill'
-          ? [{ loops: [...item.contours.outer, ...item.contours.inner], item }]
-          : [...item.contours.outer, ...item.contours.inner].map((loop) => ({
+          ? [{ loops: [...contours.outer, ...contours.inner], item }]
+          : [...contours.outer, ...contours.inner].map((loop) => ({
               loops: [loop],
               item,
             }))

@@ -56,6 +56,62 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('Properties sidebar object-specific behavior', () => {
+  it('keeps the free-socket creation workflow out of the properties sidebar', () => {
+    useEditor.getState().newProject('box')
+    useEditor.getState().selectPanel('front')
+    render(<Properties />)
+    expect(
+      screen.queryByText('Aufnahmen automatisch verteilen'),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/Freie Aufnahmen/)).not.toBeInTheDocument()
+  })
+  it('lists generated cross sockets with the existing panel cut properties', async () => {
+    useEditor.getState().newProject('box')
+    useEditor.getState().selectPanel('front')
+    useEditor.getState().createSocketPattern({
+      count: 2,
+      span: 30,
+      slotLength: 15,
+      targetThickness: 3,
+      clearance: 0.1,
+      socketType: 'cross',
+      entrySide: 'positive',
+      depthRatio: 0.5,
+    })
+    render(<Properties />)
+    expect(screen.getByText('Aussparungen · 2')).toBeInTheDocument()
+    expect(screen.getAllByText(/Kreuzsteckaufnahme/)).toHaveLength(2)
+    expect(screen.getAllByText(/Kante A · 50 % Tiefe/)).toHaveLength(2)
+    const first = screen
+      .getAllByText(/Kreuzsteckaufnahme/)[0]
+      .closest('details')!
+    expect(
+      within(first).getByText('Abstand von linker Kante'),
+    ).toBeInTheDocument()
+    const firstPosition = first.querySelector('input')!
+    expect(Number(firstPosition.value)).toBe(
+      useEditor.getState().panels.find((panel) => panel.id === 'front')!
+        .size[0] /
+        2 -
+        15,
+    )
+    fireEvent.change(firstPosition, { target: { value: '20' } })
+    expect(useEditor.getState().socketPatterns[0].instances[0].offset).toBe(
+      20 -
+        useEditor.getState().panels.find((panel) => panel.id === 'front')!
+          .size[0] /
+          2 +
+        15,
+    )
+    await userEvent.click(within(first).getByText('Entfernen'))
+    expect(
+      useEditor.getState().panels.find((panel) => panel.id === 'front')!.cuts,
+    ).toHaveLength(1)
+    expect(useEditor.getState().socketPatterns[0].instances[0].deleted).toBe(
+      true,
+    )
+  })
+
   it.each([
     [
       'rectangle',

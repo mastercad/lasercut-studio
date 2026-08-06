@@ -10,6 +10,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useEditor } from '../store/editor'
 import { Toolbar } from './Toolbar'
+import { pickPanelFromCanvas } from './panelPicker'
 
 beforeEach(() => {
   useEditor.getState().newProject('empty')
@@ -22,6 +23,7 @@ beforeEach(() => {
     snapEnabled: false,
     transformGridEnabled: false,
   })
+  useEditor.setState({ isDirty: false })
   vi.stubGlobal('alert', vi.fn())
   vi.stubGlobal('URL', {
     createObjectURL: vi.fn(() => 'blob:test'),
@@ -34,11 +36,134 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  document.querySelector('[data-test-properties-host]')?.remove()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
 describe('Toolbar', () => {
+  it('opens free socket management as a dedicated tool dialog', async () => {
+    useEditor.getState().newProject('box')
+    useEditor.getState().selectPanel('front')
+    const propertiesHost = document.createElement('aside')
+    propertiesHost.className = 'properties-panel'
+    propertiesHost.dataset.testPropertiesHost = 'true'
+    propertiesHost.scrollTop = 120
+    document.body.append(propertiesHost)
+    render(<Toolbar />)
+    const button = screen.getByRole('button', {
+      name: 'Freie Aufnahmen verwalten',
+    })
+    expect(button).toHaveClass('icon-button')
+    expect(button.closest('.toolbar-group')).toHaveClass('tools')
+    expect(button.querySelector('svg')).toBeInTheDocument()
+    expect(button).not.toHaveTextContent('Freie Aufnahmen')
+    await userEvent.click(button)
+    expect(
+      screen.getByText('Freie Aufnahmen', { selector: 'h2' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('dialog').parentElement).toBe(propertiesHost)
+    expect(propertiesHost).toHaveClass('socket-wizard-open')
+    expect(propertiesHost.scrollTop).toBe(0)
+    expect(useEditor.getState().socketPatterns).toHaveLength(0)
+    await waitFor(() =>
+      expect(useEditor.getState().jointPreview?.[0].cuts).toHaveLength(4),
+    )
+    const width = useEditor
+      .getState()
+      .panels.find((panel) => panel.id === 'front')!.size[0]
+    expect(screen.queryByText('Verteilspanne · mm')).not.toBeInTheDocument()
+    expect(screen.getByText('Erstellen').closest('footer')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Anzahl'), {
+      target: { value: '3' },
+    })
+    await waitFor(() =>
+      expect(useEditor.getState().jointPreview?.[0].cuts).toHaveLength(3),
+    )
+    expect(useEditor.getState().socketPatterns).toHaveLength(0)
+    fireEvent.change(screen.getByLabelText('Anzahl'), {
+      target: { value: '4' },
+    })
+    fireEvent.click(screen.getByText('Erstellen'))
+    expect(useEditor.getState().socketPatterns).toHaveLength(1)
+    expect(useEditor.getState().jointPreview).toBeNull()
+    expect(
+      useEditor
+        .getState()
+        .socketPatterns[0].instances.map(
+          (instance) => instance.basePosition + width / 2,
+        ),
+    ).toEqual([width / 5, (width * 2) / 5, (width * 3) / 5, (width * 4) / 5])
+    expect(
+      screen.getByText('Freie Aufnahmen', { selector: 'h2' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Auf andere Platte übertragen')).toBeInTheDocument()
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Zielplatte im 3D-Modell auswählen' }),
+    )
+    act(() => {
+      expect(pickPanelFromCanvas('front')).toBe(true)
+    })
+    expect(
+      screen.getByRole('button', { name: 'Zielauswahl abbrechen' }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    act(() => {
+      expect(pickPanelFromCanvas('back')).toBe(true)
+    })
+    expect(screen.getByLabelText('Zielpanel')).toHaveValue('back')
+    await waitFor(() =>
+      expect(useEditor.getState().jointPreview?.[0]).toMatchObject({
+        panelId: 'back',
+      }),
+    )
+    expect(useEditor.getState().jointPreview?.[0].cuts).toHaveLength(4)
+    fireEvent.click(screen.getByText('Verknüpfen'))
+    expect(useEditor.getState().socketPatterns).toHaveLength(2)
+    expect(useEditor.getState().socketPatterns[1].panelId).toBe('back')
+    fireEvent.click(screen.getByRole('button', { name: 'Aufnahmen schließen' }))
+    expect(
+      screen.queryByText('Freie Aufnahmen', { selector: 'h2' }),
+    ).not.toBeInTheDocument()
+    expect(propertiesHost).not.toHaveClass('socket-wizard-open')
+    expect(propertiesHost.scrollTop).toBe(120)
+  })
+
+  it('removes the live socket preview when the dialog is closed', async () => {
+    useEditor.getState().newProject('box')
+    useEditor.getState().selectPanel('front')
+    render(<Toolbar />)
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Freie Aufnahmen verwalten' }),
+    )
+    await waitFor(() =>
+      expect(useEditor.getState().jointPreview).not.toBeNull(),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Aufnahmen schließen' }))
+    await waitFor(() => expect(useEditor.getState().jointPreview).toBeNull())
+    expect(useEditor.getState().socketPatterns).toHaveLength(0)
+  })
+
+  it('removes a target-panel ghost when transfer is cancelled by closing', async () => {
+    useEditor.getState().newProject('box')
+    useEditor.getState().selectPanel('front')
+    render(<Toolbar />)
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Freie Aufnahmen verwalten' }),
+    )
+    fireEvent.click(screen.getByText('Erstellen'))
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Zielplatte im 3D-Modell auswählen' }),
+    )
+    act(() => {
+      expect(pickPanelFromCanvas('back')).toBe(true)
+    })
+    await waitFor(() =>
+      expect(useEditor.getState().jointPreview?.[0].panelId).toBe('back'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Aufnahmen schließen' }))
+    await waitFor(() => expect(useEditor.getState().jointPreview).toBeNull())
+  })
+
   it('creates every primitive and enables object actions only with a selection', () => {
     render(<Toolbar />)
     const add = screen.getByLabelText('Objekt hinzufügen')
@@ -160,6 +285,37 @@ describe('Toolbar', () => {
       .querySelector('input')!
     fireEvent.keyDown(input, { key: 'd', ctrlKey: true })
     expect(useEditor.getState().panels).toHaveLength(2)
+  })
+
+  it('guards imports and browser closing while the project is dirty', async () => {
+    useEditor.getState().addShape('rectangle')
+    render(<Toolbar />)
+    expect(screen.getByText('LaserCut Studio *')).toBeInTheDocument()
+
+    fireEvent.click(
+      screen.getByText('SVG/DXF/LightBurn importieren', {
+        selector: 'button',
+      }),
+    )
+    expect(screen.getByText('Ungespeicherte Änderungen')).toBeInTheDocument()
+    expect(
+      screen.queryByText('Vektordatei importieren'),
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('Abbrechen'))
+
+    const unload = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(unload)
+    expect(unload.defaultPrevented).toBe(true)
+
+    fireEvent.click(
+      screen.getByText('SVG/DXF/LightBurn importieren', {
+        selector: 'button',
+      }),
+    )
+    fireEvent.click(screen.getByText('Projekt speichern'))
+    expect(URL.createObjectURL).toHaveBeenCalledOnce()
+    expect(useEditor.getState().isDirty).toBe(false)
+    expect(screen.getByText('Vektordatei importieren')).toBeInTheDocument()
   })
 
   it('shows and dismisses missing-font warning', async () => {

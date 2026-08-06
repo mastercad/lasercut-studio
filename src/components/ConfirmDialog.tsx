@@ -7,6 +7,8 @@ export function ConfirmDialog({
   description,
   detail,
   confirmLabel,
+  secondaryLabel,
+  onSecondary,
   onConfirm,
   onCancel,
 }: {
@@ -15,6 +17,8 @@ export function ConfirmDialog({
   description: string
   detail?: string
   confirmLabel: string
+  secondaryLabel?: string
+  onSecondary?: () => void
   onConfirm: () => void
   onCancel: () => void
 }) {
@@ -62,6 +66,11 @@ export function ConfirmDialog({
           <button className="modal-cancel" autoFocus onClick={onCancel}>
             Abbrechen
           </button>
+          {secondaryLabel && onSecondary && (
+            <button className="secondary" onClick={onSecondary}>
+              {secondaryLabel}
+            </button>
+          )}
           <button className="modal-danger" onClick={onConfirm}>
             {confirmLabel}
           </button>

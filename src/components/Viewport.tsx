@@ -1,4 +1,5 @@
 import {
+  Edges,
   Environment,
   Grid,
   GizmoHelper,
@@ -36,6 +37,7 @@ import {
   createCachedEvaluatedPanelGeometry,
   panelGeometryKey,
 } from '../model/panelGeometry'
+import { pickPanelFromCanvas } from './panelPicker'
 import { useEditor } from '../store/editor'
 import {
   calculateAlignmentGuides,
@@ -402,10 +404,11 @@ function PreviewShape({
       <meshBasicMaterial
         color={color ?? (operation === 'subtract' ? '#ff3158' : '#3dff9a')}
         transparent
-        opacity={0.58}
+        opacity={0.82}
         depthTest={false}
         depthWrite={false}
       />
+      <Edges color="#ffffff" lineWidth={1.4} threshold={12} />
     </mesh>
   )
 }
@@ -430,10 +433,9 @@ function EditorReliefHole({ feature }: { feature: JointFeature }) {
 function JointPreviewOverlay() {
   const preview = useEditor((state) => state.jointPreview)
   const panels = useEditor((state) => state.panels)
-  if (!preview) return null
   return (
-    <group>
-      {preview.map((entry) => {
+    <group visible={Boolean(preview)}>
+      {(preview ?? []).map((entry) => {
         const panel = panels.find((candidate) => candidate.id === entry.panelId)
         if (!panel) return null
         return (
@@ -686,6 +688,7 @@ function EditablePanel({
       rotation={panel.rotation}
       onClick={(event) => {
         event.stopPropagation()
+        if (pickPanelFromCanvas(panel.id)) return
         if (sceneSelectionSuppressed()) return
         selectPanel(panel.id, event.ctrlKey || event.metaKey || event.shiftKey)
       }}

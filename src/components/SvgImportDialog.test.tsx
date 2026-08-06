@@ -365,6 +365,29 @@ describe('SvgImportDialog', () => {
     })
   })
 
+  it('starts at the first unmapped object without changing existing assignments', async () => {
+    render(<SvgImportDialog open initialFile={svgFile} onClose={vi.fn()} />)
+    await screen.findByText('Endgröße bestätigen')
+    fireEvent.click(screen.getByText('Weiter'))
+    fireEvent.change(screen.getByLabelText('Material für Teil A'), {
+      target: { value: 'acrylic-3' },
+    })
+
+    fireEvent.click(screen.getByText('Materialwizard verwenden'))
+    expect(screen.getByText('Objekt 2 von 2')).toBeInTheDocument()
+    expect(screen.getByText('1 vollständig kontrolliert')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Dieses Objekt nicht importieren'))
+    expect(screen.getByText('2 vollständig kontrolliert')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Weiter'))
+    fireEvent.click(screen.getByText('In 3D übernehmen'))
+    await waitFor(() => expect(useEditor.getState().panels).toHaveLength(1))
+    expect(useEditor.getState().panels[0]).toMatchObject({
+      label: 'Teil A',
+      materialId: 'acrylic-3',
+    })
+  })
+
   it('zooms, resets, wheels and pans the real SVG viewBox without CSS scaling', async () => {
     const { container } = render(
       <SvgImportDialog open initialFile={svgFile} onClose={vi.fn()} />,

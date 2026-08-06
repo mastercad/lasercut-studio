@@ -129,11 +129,18 @@ describe('LBRN2 conversion', () => {
       mode: 'line',
       speed: 400,
       power: 80,
+      minPower: 10,
       passes: 2,
       airAssist: true,
       objectIds: ['panel'],
       contourCount: 1,
       configured: true,
+      output: false,
+      sourceParameters: {
+        frequency: 40_000,
+        overscanPercent: 5,
+        angle: 45,
+      },
     }
     const output = createLbrn2Project(
       [
@@ -152,6 +159,10 @@ describe('LBRN2 conversion', () => {
     )
     expect(output).toContain('<CutSetting type="Cut">')
     expect(output).toContain('<speed Value="400"/>')
+    expect(output).toContain('<minPower Value="10"/>')
+    expect(output).toContain('<airAssist Value="1"/>')
+    expect(output).toContain('<output Value="0"/>')
+    expect(output).toContain('<frequency Value="40000"/>')
     expect(output).toContain('<PrimList>L0 1L1 2L2 3L3 0</PrimList>')
     const roundTrip = convertLbrn2ToSvg(output)
     expect(roundTrip.shapeCount).toBe(1)
@@ -159,7 +170,11 @@ describe('LBRN2 conversion', () => {
       name: 'Außenschnitt',
       speed: 400,
       maxPower: 80,
+      minPower: 10,
       passes: 2,
+      airAssist: true,
+      output: false,
+      frequency: 40_000,
     })
   })
 

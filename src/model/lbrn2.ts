@@ -14,6 +14,14 @@ export type Lbrn2CutSetting = {
   maxPower: number
   passes: number
   interval?: number
+  priority: number
+  color: string
+  airAssist?: boolean
+  output?: boolean
+  frequency?: number
+  overscanPercent?: number
+  angle?: number
+  focusOffset?: number
 }
 
 export type Lbrn2Conversion = {
@@ -98,6 +106,12 @@ const childValue = (element: Element, name: string, fallback = 0) => {
     element.querySelector(`:scope > ${name}`)?.getAttribute('Value'),
   )
   return Number.isFinite(value) ? value : fallback
+}
+const optionalChildValue = (element: Element, name: string) => {
+  const node = element.querySelector(`:scope > ${name}`)
+  if (!node) return undefined
+  const value = Number(node.getAttribute('Value'))
+  return Number.isFinite(value) ? value : undefined
 }
 
 function parseVertices(value: string): Vertex[] {
@@ -241,6 +255,14 @@ export function convertLbrn2ToSvg(contents: string): Lbrn2Conversion {
       maxPower: childValue(setting, 'maxPower'),
       passes: childValue(setting, 'numPasses', 1),
       interval: childValue(setting, 'interval') || undefined,
+      priority: childValue(setting, 'priority'),
+      color: lightBurnColors[childValue(setting, 'index', -1)] ?? '#707070',
+      airAssist: childValue(setting, 'airAssist') > 0,
+      output: optionalChildValue(setting, 'output') !== 0,
+      frequency: optionalChildValue(setting, 'frequency'),
+      overscanPercent: optionalChildValue(setting, 'overscanPercent'),
+      angle: optionalChildValue(setting, 'angle'),
+      focusOffset: optionalChildValue(setting, 'zOffset'),
     }),
   )
   const cutByIndex = new Map(
@@ -402,9 +424,25 @@ export function createLbrn2Project(
         index,
       ) => `  <CutSetting type="${step.mode === 'fill' ? 'Scan' : 'Cut'}">
     <index Value="${index}"/><name Value="${xmlEscape(step.name)}"/>
-    <minPower Value="${number(step.power)}"/><maxPower Value="${number(step.power)}"/>
+    <minPower Value="${number(step.minPower ?? step.power)}"/><maxPower Value="${number(step.power)}"/>
     <speed Value="${number(step.speed)}"/><numPasses Value="${Math.max(1, step.passes)}"/>
     <interval Value="${number(step.lineInterval ?? 0.1)}"/><priority Value="${index}"/>
+    <airAssist Value="${step.airAssist ? 1 : 0}"/><output Value="${step.output === false ? 0 : 1}"/>${
+      step.sourceParameters?.frequency === undefined
+        ? ''
+        : `
+    <frequency Value="${number(step.sourceParameters.frequency)}"/>`
+    }${
+      step.sourceParameters?.overscanPercent === undefined
+        ? ''
+        : `
+    <overscanPercent Value="${number(step.sourceParameters.overscanPercent)}"/>`
+    }${
+      step.sourceParameters?.angle === undefined
+        ? ''
+        : `
+    <angle Value="${number(step.sourceParameters.angle)}"/>`
+    }
   </CutSetting>`,
     )
     .join('\n')
