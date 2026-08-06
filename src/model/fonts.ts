@@ -27,7 +27,7 @@ type LocalFontData = {
 const localFontData = new Map<string, LocalFontData>()
 const bundledFont = new FontLoader().parse(bundledFontData)
 
-const outlineFromFont = (
+export const outlineFromFont = (
   font: opentype.Font,
   text: string,
   fontSize: number,

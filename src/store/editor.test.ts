@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createBoxPanels, defaultBox, defaultMaterials } from '../model/box'
 import { worldHalfExtents } from '../model/snapping'
+import { shapeToFreeContour } from '../model/contours'
 import {
   createDefaultExportLayers,
   createDefaultLaserPresets,
@@ -50,6 +51,113 @@ beforeEach(() => {
 })
 
 describe('editor object operations', () => {
+  it('converts contours in place or as a grouped editable copy and ignores missing ids', () => {
+    const before = useEditor.getState().panels.length
+    useEditor.getState().convertPanelToFreeContour('missing')
+    expect(useEditor.getState().panels).toHaveLength(before)
+    useEditor.getState().convertPanelToFreeContour('front')
+    expect(
+      useEditor.getState().panels.find(({ id }) => id === 'front')?.shape,
+    ).toMatchObject({ type: 'free' })
+    useEditor.getState().convertPanelToFreeContour('left', true)
+    const copy = useEditor.getState().panels.at(-1)!
+    expect(copy).toMatchObject({
+      label: 'Linke Seite · Kontur',
+      shape: { type: 'free' },
+    })
+    expect(useEditor.getState().groups[0].panelIds).toContain(copy.id)
+    expect(useEditor.getState().selectedPanels).toEqual([copy.id])
+  })
+
+  it('updates, clamps and explicitly removes independent laser text', () => {
+    useEditor.getState().addLaserText('front')
+    const text = useEditor.getState().laserTexts[0]
+    useEditor
+      .getState()
+      .updateLaserText(text.id, { text: 'Gravur', fontSize: 0, rotation: 1.2 })
+    expect(useEditor.getState().laserTexts[0]).toMatchObject({
+      text: 'Gravur',
+      fontSize: 1,
+      rotation: 1.2,
+    })
+    useEditor.getState().updateLaserText('missing', { text: 'unberührt' })
+    expect(useEditor.getState().laserTexts).toHaveLength(1)
+    useEditor.getState().removeLaserText(text.id)
+    expect(useEditor.getState().laserTexts).toEqual([])
+  })
+
+  it('moves, reorders and resets material export layers while preserving their color slots', () => {
+    const materialLayers = useEditor
+      .getState()
+      .exportLayers.filter(({ materialId }) => materialId === 'birch-3')
+      .sort((a, b) => a.order - b.order)
+    const first = materialLayers[0]
+    const second = materialLayers[1]
+    const colors = [...useEditor.getState().exportLayers]
+      .sort((a, b) => a.order - b.order)
+      .map(({ color }) => color)
+    useEditor.getState().moveExportLayer(first.id, -1)
+    expect(
+      useEditor.getState().exportLayers.find(({ id }) => id === first.id)
+        ?.order,
+    ).toBe(first.order)
+    useEditor.getState().moveExportLayer(first.id, 1)
+    expect(
+      useEditor.getState().exportLayers.find(({ id }) => id === first.id)
+        ?.order,
+    ).toBe(second.order)
+    expect(
+      [...useEditor.getState().exportLayers]
+        .sort((a, b) => a.order - b.order)
+        .map(({ color }) => color),
+    ).toEqual(colors)
+    useEditor.getState().reorderExportLayer(first.id, second.id, 'before')
+    expect(
+      useEditor.getState().exportLayers.find(({ id }) => id === first.id)!
+        .order,
+    ).toBeLessThan(
+      useEditor.getState().exportLayers.find(({ id }) => id === second.id)!
+        .order,
+    )
+    useEditor.getState().reorderExportLayer('missing', second.id)
+    useEditor.getState().resetExportLayers()
+    expect(useEditor.getState().exportLayers).toEqual(
+      createDefaultExportLayers(defaultMaterials),
+    )
+  })
+
+  it('creates missing standard cut presets, updates existing pairs and moves processing profiles', () => {
+    const laserId = useEditor.getState().activeLaserId!
+    useEditor.setState({ laserPresets: [] })
+    useEditor
+      .getState()
+      .updateStandardCut(laserId, 'birch-3', { speed: 17, power: 66 })
+    expect(
+      useEditor
+        .getState()
+        .laserPresets.filter(({ operation }) => operation.startsWith('cut-')),
+    ).toHaveLength(2)
+    expect(
+      useEditor
+        .getState()
+        .laserPresets.every(({ speed, power }) => speed === 17 && power === 66),
+    ).toBe(true)
+    useEditor.getState().updateStandardCut(laserId, 'birch-3', { passes: 3 })
+    expect(
+      useEditor.getState().laserPresets.every(({ passes }) => passes === 3),
+    ).toBe(true)
+    const profiles = [...useEditor.getState().processingProfiles].sort(
+      (a, b) => a.order - b.order,
+    )
+    useEditor.getState().moveProcessingProfile('missing', 1)
+    useEditor.getState().moveProcessingProfile(profiles[0].id, -1)
+    useEditor.getState().moveProcessingProfile(profiles[0].id, 1)
+    expect(
+      useEditor
+        .getState()
+        .processingProfiles.find(({ id }) => id === profiles[0].id)?.order,
+    ).toBe(profiles[1].order)
+  })
   it('starts clean empty and standard-box projects with cleared history', () => {
     useEditor.getState().addShape('circle')
     useEditor.getState().newProject('empty')
@@ -89,6 +197,26 @@ describe('editor object operations', () => {
             ],
           },
         ],
+        attachedOperations: [
+          {
+            id: 'engraving',
+            name: 'Seriennummer',
+            operation: 'Scan',
+            shapeType: 'Text',
+            faces: [
+              {
+                id: 'engraving-face',
+                outer: [
+                  [25, 12],
+                  [35, 12],
+                  [35, 18],
+                  [25, 18],
+                ],
+                holes: [],
+              },
+            ],
+          },
+        ],
       },
       {
         name: 'Einleger',
@@ -118,6 +246,23 @@ describe('editor object operations', () => {
     ])
     expect(imported[0].position).toEqual([-15, 0, 0])
     expect(imported[1].position).toEqual([35, -5, 0])
+    expect(imported[0].rotation).toEqual([0, 0, 0])
+    expect(imported[1].rotation).toEqual([0, 0, 0])
+    expect(imported[0].importedOperations?.[0]).toMatchObject({
+      name: 'Seriennummer',
+      operation: 'Scan',
+      shapeType: 'Text',
+      faces: [
+        {
+          outer: [
+            [-5, -3],
+            [5, -3],
+            [5, 3],
+            [-5, 3],
+          ],
+        },
+      ],
+    })
     expect(
       imported[0].shape?.type === 'free'
         ? imported[0].shape.faces[0].outer
@@ -172,6 +317,24 @@ describe('editor object operations', () => {
     })
     expect(useEditor.getState().selectedPanels).toEqual([created.id])
     expect(useEditor.getState().laserTexts).toEqual([])
+  })
+
+  it('keeps distinct parameters for freshly created shape types', () => {
+    for (const type of ['circle', 'star', 'polygon', 'rectangle'] as const)
+      useEditor.getState().addShape(type)
+    const shapes = useEditor
+      .getState()
+      .panels.slice(-4)
+      .map((panel) => panel.shape)
+
+    expect(shapes[0]).toMatchObject({ type: 'circle', segments: 64 })
+    expect(shapes[1]).toMatchObject({
+      type: 'star',
+      points: 5,
+      innerRatio: 0.45,
+    })
+    expect(shapes[2]).toMatchObject({ type: 'polygon', sides: 6 })
+    expect(shapes[3]).toEqual({ type: 'rectangle' })
   })
   it('treats laser text as an independently selectable and removable scene object', () => {
     useEditor.getState().addLaserText('front')
@@ -650,7 +813,7 @@ describe('editor object operations', () => {
     expect(
       useEditor.getState().panels.find((panel) => panel.id === 'front')!.shape
         ?.type,
-    ).toBe('free')
+    ).toBeUndefined()
     expect(useEditor.getState().contourSelection).toEqual({
       panelId: 'front',
       faceIndex: 0,
@@ -664,35 +827,59 @@ describe('editor object operations', () => {
     useEditor.getState().selectContourFace('front', 0, -1, 0)
     const beforeFace = useEditor
       .getState()
-      .panels.find((panel) => panel.id === 'front')!.shape
-    if (beforeFace?.type !== 'free') throw new Error('expected free contour')
-    const original = beforeFace.faces[0].outer.map((point) => [...point])
+      .panels.find((panel) => panel.id === 'front')!
+    const original = shapeToFreeContour(beforeFace).faces[0].outer.map(
+      (point) => [...point],
+    )
     useEditor.getState().moveSelectedContour([2, 3])
     const afterFace = useEditor
       .getState()
       .panels.find((panel) => panel.id === 'front')!.shape
-    if (afterFace?.type !== 'free') throw new Error('expected free contour')
-    expect(afterFace.faces[0].outer[0]).toEqual([
+    if (afterFace?.type !== 'rectangle')
+      throw new Error('expected parametric rectangle')
+    expect(afterFace.editedFaces?.[0].outer[0]).toEqual([
       original[0][0] + 2,
       original[0][1] + 3,
     ])
-    expect(afterFace.faces[0].outer[1]).toEqual([
+    expect(afterFace.editedFaces?.[0].outer[1]).toEqual([
       original[1][0] + 2,
       original[1][1] + 3,
     ])
-    expect(afterFace.faces[0].outer[2]).toEqual(original[2])
+    expect(afterFace.editedFaces?.[0].outer[2]).toEqual(original[2])
 
     useEditor.getState().selectContourEdge('front', 0, -1, 2)
     useEditor.getState().moveSelectedContour([4, -1])
     const afterEdge = useEditor
       .getState()
       .panels.find((panel) => panel.id === 'front')!.shape
-    if (afterEdge?.type !== 'free') throw new Error('expected free contour')
-    expect(afterEdge.faces[0].outer[2]).toEqual([
+    if (afterEdge?.type !== 'rectangle')
+      throw new Error('expected parametric rectangle')
+    expect(afterEdge.editedFaces?.[0].outer[2]).toEqual([
       original[2][0] + 4,
       original[2][1] - 1,
     ])
-    expect(afterEdge.faces[0].outer[3]).toEqual(original[3])
+    expect(afterEdge.editedFaces?.[0].outer[3]).toEqual(original[3])
+  })
+
+  it('keeps text parameters when its contour is edited by face or edge', () => {
+    useEditor.getState().addShape('text')
+    const text = useEditor.getState().panels.at(-1)!
+    expect(text.shape?.type).toBe('text')
+
+    useEditor.getState().selectContourFace(text.id, 0, -1, 0)
+    useEditor.getState().moveSelectedContour([2, 0])
+
+    const edited = useEditor
+      .getState()
+      .panels.find((panel) => panel.id === text.id)!
+    expect(edited.shape).toMatchObject({
+      type: 'text',
+      text: 'Text',
+      fontFamily: expect.any(String),
+      fontSize: 20,
+    })
+    if (edited.shape?.type !== 'text') throw new Error('expected text shape')
+    expect(edited.shape.editedFaces?.[0].outer[0]).toEqual([1.95, -0.05])
   })
 
   it('keeps the complete box exterior fixed when all panels change from 3 mm to 5 mm', () => {
@@ -910,6 +1097,107 @@ describe('editor object operations', () => {
     const panels = useEditor.getState().panels
     expect(useEditor.getState().loadProject('{"wrong":true}')).toBe(false)
     expect(useEditor.getState().panels).toBe(panels)
+  })
+
+  it('migrates legacy project defaults, processing recipes, text engravings and off-center SVG pivots', () => {
+    const document = JSON.parse(useEditor.getState().serializeProject())
+    const current = document.current
+    delete current.exportLayers
+    delete current.laserCutters
+    delete current.laserPresets
+    delete current.activeLaserId
+    delete current.processingRecipes
+    delete current.groups
+    delete current.laserTexts
+    current.colorMode = 'legacy'
+    current.selectedGroupId = 42
+    current.processingProfiles = [
+      {
+        id: 'legacy-profile',
+        name: 'Legacy Gravur',
+        geometry: 'fill',
+        referenceDepth: 0.5,
+        color: '#123456',
+        order: 0,
+        laserId: defaultLaserCutters[0].id,
+        materialId: 'birch-3',
+        speed: 90,
+        power: 20,
+        passes: 1,
+        airAssist: false,
+        lineInterval: 0.1,
+        focusOffset: 0,
+      },
+    ]
+    current.panels[0] = {
+      ...current.panels[0],
+      shape: {
+        type: 'text',
+        text: 'Alt',
+        fontFamily: 'Arial',
+        fontSize: 10,
+        operation: 'engrave-fill',
+        outline: null,
+      },
+      processingAssignments: undefined,
+      visible: undefined,
+      autoCut: undefined,
+    }
+    current.panels[1] = {
+      ...current.panels[1],
+      position: [5, 6, 7],
+      shape: {
+        type: 'free',
+        sourceType: 'svg',
+        faces: [
+          {
+            id: 'svg',
+            outer: [
+              [10, 20],
+              [30, 20],
+              [30, 40],
+              [10, 40],
+            ],
+            holes: [],
+          },
+        ],
+      },
+    }
+    document.history.past = [{ ...current, panels: current.panels }]
+    expect(useEditor.getState().loadProject(JSON.stringify(document))).toBe(
+      true,
+    )
+    const state = useEditor.getState()
+    expect(state.exportLayers.length).toBeGreaterThan(0)
+    expect(state.laserCutters).toEqual(defaultLaserCutters)
+    expect(state.activeLaserId).toBe(defaultLaserCutters[0].id)
+    expect(state.processingProfiles).toEqual([
+      expect.objectContaining({ id: 'legacy-profile', geometry: 'fill' }),
+    ])
+    expect(state.processingRecipes[0]).toMatchObject({
+      profileId: 'legacy-profile',
+      layerColor: '#123456',
+    })
+    expect(state.panels[0]).toMatchObject({
+      visible: true,
+      autoCut: false,
+      processingAssignments: [
+        expect.objectContaining({
+          profileId: 'legacy-profile',
+          geometry: 'fill',
+        }),
+      ],
+    })
+    expect(state.panels[1].position).not.toEqual([5, 6, 7])
+    expect(shapeToFreeContour(state.panels[1]).faces[0].outer).toEqual([
+      [-10, -10],
+      [10, -10],
+      [10, 10],
+      [-10, 10],
+    ])
+    expect(state.groups[0].name).toBe('Baugruppe 01')
+    expect(state.colorMode).toBe('material')
+    expect(state.selectedGroupId).toBeNull()
   })
 
   it('round-trips laser machines, material presets and export layers through a project file', () => {

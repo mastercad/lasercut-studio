@@ -1,5 +1,21 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { ArrowDown, ArrowUp, Download, Eye, X } from 'lucide-react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react'
+import {
+  ArrowDown,
+  ArrowUp,
+  Download,
+  Eye,
+  Maximize2,
+  Minus,
+  Plus,
+  X,
+} from 'lucide-react'
 import {
   getExportWorkerClient,
   type ExportAnalysis,
@@ -28,6 +44,18 @@ export function ExportWorkspace() {
   )
   const [previewSvg, setPreviewSvg] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const previewStageRef = useRef<HTMLDivElement>(null)
+  const previewZoomOutputRef = useRef<HTMLOutputElement>(null)
+  const previewBaseViewBoxRef = useRef({ x: 0, y: 0, width: 1, height: 1 })
+  const previewViewRef = useRef({ zoom: 1, x: 0, y: 0 })
+  const previewDragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    originX: number
+    originY: number
+    inverseScreenMatrix: DOMMatrix
+  } | null>(null)
   const workerRef = useRef(getExportWorkerClient())
   const [exportGroupId, setExportGroupId] = useState(() =>
     selectedGroupId && groups.some((group) => group.id === selectedGroupId)
@@ -142,6 +170,61 @@ export function ExportWorkspace() {
       current = false
     }
   }, [workerPayload, previewMaterialId])
+  useLayoutEffect(() => {
+    const svg = previewStageRef.current?.querySelector('svg')
+    if (!svg || !previewSvg) return
+    const viewBox = svg.viewBox.baseVal
+    const base = {
+      x: viewBox.x,
+      y: viewBox.y,
+      width: viewBox.width || 1,
+      height: viewBox.height || 1,
+    }
+    previewBaseViewBoxRef.current = base
+    applyPreviewView({ zoom: 1, x: base.x, y: base.y })
+  }, [previewMaterialId, previewSvg])
+  const applyPreviewView = (view: { zoom: number; x: number; y: number }) => {
+    previewViewRef.current = view
+    const svg = previewStageRef.current?.querySelector('svg')
+    const base = previewBaseViewBoxRef.current
+    svg?.setAttribute(
+      'viewBox',
+      `${view.x} ${view.y} ${base.width / view.zoom} ${base.height / view.zoom}`,
+    )
+    if (previewZoomOutputRef.current)
+      previewZoomOutputRef.current.value = `${Math.round(view.zoom * 100)}%`
+  }
+  const zoomPreview = (
+    nextZoom: number,
+    clientX?: number,
+    clientY?: number,
+  ) => {
+    const svg = previewStageRef.current?.querySelector('svg')
+    const base = previewBaseViewBoxRef.current
+    const current = previewViewRef.current
+    const zoom = Math.min(12, Math.max(0.5, nextZoom))
+    if (!svg) return applyPreviewView({ ...current, zoom })
+    const rect = svg.getBoundingClientRect()
+    const matrix = svg.getScreenCTM()
+    if (!matrix) return applyPreviewView({ ...current, zoom })
+    const point = new DOMPoint(
+      clientX ?? rect.left + rect.width / 2,
+      clientY ?? rect.top + rect.height / 2,
+    ).matrixTransform(matrix.inverse())
+    const currentWidth = base.width / current.zoom
+    const currentHeight = base.height / current.zoom
+    const fractionX = (point.x - current.x) / currentWidth
+    const fractionY = (point.y - current.y) / currentHeight
+    applyPreviewView({
+      zoom,
+      x: point.x - fractionX * (base.width / zoom),
+      y: point.y - fractionY * (base.height / zoom),
+    })
+  }
+  const resetPreviewView = () => {
+    const base = previewBaseViewBoxRef.current
+    applyPreviewView({ zoom: 1, x: base.x, y: base.y })
+  }
   const download = async () => {
     if (!workerPayload || !workerRef.current) return
     setExporting(true)
@@ -179,7 +262,7 @@ export function ExportWorkspace() {
           <h2>Fertigung</h2>
           <p>
             Prüfe Bearbeitungsreihenfolge, Maschinenwerte und Vorschau, bevor du
-            das LightBurn-Paket herunterlädst.
+            das SVG-/DXF-/LBRN2-Paket für LightBurn herunterlädst.
           </p>
         </div>
         <div>
@@ -458,9 +541,67 @@ export function ExportWorkspace() {
                 </button>
               ))}
             </nav>
-            <div className="preview-canvas">
+            <div
+              className="preview-canvas"
+              onWheel={(event) => {
+                event.preventDefault()
+                zoomPreview(
+                  previewViewRef.current.zoom *
+                    Math.exp(-event.deltaY * 0.0015),
+                  event.clientX,
+                  event.clientY,
+                )
+              }}
+              onPointerDown={(event) => {
+                if (event.button !== 0) return
+                const matrix = previewStageRef.current
+                  ?.querySelector('svg')
+                  ?.getScreenCTM()
+                if (!matrix) return
+                const inverseScreenMatrix = matrix.inverse()
+                const start = new DOMPoint(
+                  event.clientX,
+                  event.clientY,
+                ).matrixTransform(inverseScreenMatrix)
+                event.currentTarget.setPointerCapture(event.pointerId)
+                previewDragRef.current = {
+                  pointerId: event.pointerId,
+                  startX: start.x,
+                  startY: start.y,
+                  originX: previewViewRef.current.x,
+                  originY: previewViewRef.current.y,
+                  inverseScreenMatrix,
+                }
+                event.currentTarget.classList.add('panning')
+              }}
+              onPointerMove={(event) => {
+                const drag = previewDragRef.current
+                if (!drag || drag.pointerId !== event.pointerId) return
+                const point = new DOMPoint(
+                  event.clientX,
+                  event.clientY,
+                ).matrixTransform(drag.inverseScreenMatrix)
+                applyPreviewView({
+                  zoom: previewViewRef.current.zoom,
+                  x: drag.originX - (point.x - drag.startX),
+                  y: drag.originY - (point.y - drag.startY),
+                })
+              }}
+              onPointerUp={(event) => {
+                if (previewDragRef.current?.pointerId !== event.pointerId)
+                  return
+                previewDragRef.current = null
+                event.currentTarget.classList.remove('panning')
+                event.currentTarget.releasePointerCapture(event.pointerId)
+              }}
+              onPointerCancel={(event) => {
+                previewDragRef.current = null
+                event.currentTarget.classList.remove('panning')
+              }}
+            >
               {previewSvg ? (
                 <div
+                  ref={previewStageRef}
                   className="preview-stage"
                   dangerouslySetInnerHTML={{ __html: previewSvg }}
                 />
@@ -473,6 +614,39 @@ export function ExportWorkspace() {
                 <div className="preview-status">
                   <span className="loading-spinner" />
                   <strong>Vorschau wird erzeugt…</strong>
+                </div>
+              )}
+              {previewSvg && (
+                <div
+                  className="preview-controls"
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  <button
+                    title="Verkleinern"
+                    aria-label="Vorschau verkleinern"
+                    onClick={() =>
+                      zoomPreview(previewViewRef.current.zoom / 1.35)
+                    }
+                  >
+                    <Minus />
+                  </button>
+                  <output ref={previewZoomOutputRef}>100%</output>
+                  <button
+                    title="Vergrößern"
+                    aria-label="Vorschau vergrößern"
+                    onClick={() =>
+                      zoomPreview(previewViewRef.current.zoom * 1.35)
+                    }
+                  >
+                    <Plus />
+                  </button>
+                  <button
+                    title="Alles einpassen"
+                    aria-label="Vorschau einpassen"
+                    onClick={resetPreviewView}
+                  >
+                    <Maximize2 />
+                  </button>
                 </div>
               )}
             </div>

@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react'
 import {
+  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -19,7 +20,13 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
 } from 'react'
-import { parseSvgImport, type SvgImportDocument } from '../model/svgImport'
+import {
+  parseDxfImport,
+  parseLbrnImport,
+  parseLbrn2Import,
+  parseSvgImport,
+  type SvgImportDocument,
+} from '../model/svgImport'
 import { useEditor } from '../store/editor'
 
 type Props = {
@@ -28,21 +35,6 @@ type Props = {
   onInitialFileRead?: () => void
   onClose: () => void
 }
-const distance = (a: string, b: string) => {
-  const rgb = (color: string) => {
-    const value = color.replace('#', '')
-    return value.length === 6
-      ? [0, 2, 4].map((index) => parseInt(value.slice(index, index + 2), 16))
-      : [128, 128, 128]
-  }
-  const first = rgb(a),
-    second = rgb(b)
-  return first.reduce(
-    (sum, value, index) => sum + (value - second[index]) ** 2,
-    0,
-  )
-}
-
 export function SvgImportDialog({
   open,
   initialFile,
@@ -70,6 +62,9 @@ export function SvgImportDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [included, setIncluded] = useState<Set<string>>(new Set())
   const [assignments, setAssignments] = useState<Record<string, string>>({})
+  const [materialWizard, setMaterialWizard] = useState(false)
+  const [wizardIndex, setWizardIndex] = useState(0)
+  const [wizardReviewed, setWizardReviewed] = useState<Set<string>>(new Set())
   const [dragging, setDragging] = useState(false)
 
   const reset = () => {
@@ -79,6 +74,9 @@ export function SvgImportDialog({
     setSelected(new Set())
     setIncluded(new Set())
     setAssignments({})
+    setMaterialWizard(false)
+    setWizardIndex(0)
+    setWizardReviewed(new Set())
   }
   const close = () => {
     reset()
@@ -86,37 +84,43 @@ export function SvgImportDialog({
   }
   const readFile = async (file?: File) => {
     if (!file) return
-    if (!file.name.toLowerCase().endsWith('.svg')) {
-      setError('Bitte eine Datei mit der Endung .svg auswählen.')
+    const lowerName = file.name.toLowerCase()
+    const extension = lowerName.match(/\.(svg|dxf|lbrn|lbrn2)$/)?.[1]
+    if (!extension) {
+      setError(
+        'Bitte eine Datei mit der Endung .svg, .dxf, .lbrn oder .lbrn2 auswählen.',
+      )
       return
     }
     try {
-      const parsed = parseSvgImport(await file.text(), file.name)
-      const suggested = Object.fromEntries(
-        parsed.objects.map((object) => [
-          object.id,
-          object.color && materials.length
-            ? [...materials].sort(
-                (a, b) =>
-                  distance(object.color!, a.color) -
-                  distance(object.color!, b.color),
-              )[0].id
-            : (materials[0]?.id ?? ''),
-        ]),
-      )
+      const contents = await file.text()
+      const parsed =
+        extension === 'dxf'
+          ? parseDxfImport(contents, file.name)
+          : extension === 'lbrn'
+            ? parseLbrnImport(contents, file.name)
+            : extension === 'lbrn2'
+              ? parseLbrn2Import(contents, file.name)
+              : parseSvgImport(contents, file.name)
       setDocument(parsed)
       setWidth(Number(parsed.widthMm.toFixed(2)))
       setHeight(Number(parsed.heightMm.toFixed(2)))
-      setIncluded(new Set(parsed.objects.map((object) => object.id)))
-      setSelected(new Set(parsed.objects.map((object) => object.id)))
-      setAssignments(suggested)
+      const recommended = parsed.objects
+        .filter((object) => object.recommendedInclude !== false)
+        .map((object) => object.id)
+      setIncluded(new Set(recommended))
+      setSelected(new Set(recommended))
+      setAssignments({})
+      setMaterialWizard(false)
+      setWizardIndex(0)
+      setWizardReviewed(new Set())
       setError('')
       setStep(2)
     } catch (reason) {
       setError(
         reason instanceof Error
           ? reason.message
-          : 'Die SVG-Datei konnte nicht gelesen werden.',
+          : 'Die Vektordatei konnte nicht gelesen werden.',
       )
     }
   }
@@ -129,16 +133,24 @@ export function SvgImportDialog({
   const scaleY = document ? height / document.sourceHeight : 1
   const preview = useMemo(
     () =>
-      document?.objects.map((object) => ({
-        ...object,
-        path: object.faces
-          .map((face) => {
-            const ring = (points: [number, number][]) =>
-              `M ${points.map(([x, y]) => `${x},${-y}`).join(' L ')} Z`
-            return `${ring(face.outer)} ${face.holes.map(ring).join(' ')}`
-          })
-          .join(' '),
-      })) ?? [],
+      document?.objects
+        .map((object) => ({
+          ...object,
+          path: object.faces
+            .map((face) => {
+              const ring = (points: [number, number][]) =>
+                `M ${points.map(([x, y]) => `${x},${-y}`).join(' L ')} Z`
+              return `${ring(face.outer)} ${face.holes.map(ring).join(' ')}`
+            })
+            .join(' '),
+        }))
+        .sort(
+          (first, second) =>
+            (second.bounds.maxX - second.bounds.minX) *
+              (second.bounds.maxY - second.bounds.minY) -
+            (first.bounds.maxX - first.bounds.minX) *
+              (first.bounds.maxY - first.bounds.minY),
+        ) ?? [],
     [document],
   )
   const previewBaseViewBox = useMemo(
@@ -153,6 +165,14 @@ export function SvgImportDialog({
         : ([0, 0, 100, 100] as [number, number, number, number]),
     [document],
   )
+  const selectedPreviewIds = useMemo(() => {
+    const ids = new Set(selected)
+    for (const object of document?.objects ?? [])
+      if (selected.has(object.id))
+        for (const operation of object.attachedOperations ?? [])
+          ids.add(operation.id)
+    return ids
+  }, [document, selected])
   const applyPreviewView = (view: { zoom: number; x: number; y: number }) => {
     previewView.current = view
     previewSvgRef.current?.setAttribute(
@@ -171,6 +191,31 @@ export function SvgImportDialog({
   useEffect(() => {
     if (document) resetPreviewView()
   }, [document, previewBaseViewBox])
+  const focusObject = (objectId: string) => {
+    const object = document?.objects.find(
+      (candidate) => candidate.id === objectId,
+    )
+    if (!object) return
+    const width = Math.max(0.1, object.bounds.maxX - object.bounds.minX)
+    const height = Math.max(0.1, object.bounds.maxY - object.bounds.minY)
+    const zoom = Math.min(
+      16,
+      Math.max(
+        1,
+        Math.min(
+          previewBaseViewBox[2] / (width * 1.5),
+          previewBaseViewBox[3] / (height * 1.5),
+        ),
+      ),
+    )
+    const viewWidth = previewBaseViewBox[2] / zoom
+    const viewHeight = previewBaseViewBox[3] / zoom
+    applyPreviewView({
+      zoom,
+      x: (object.bounds.minX + object.bounds.maxX - viewWidth) / 2,
+      y: (-object.bounds.maxY - object.bounds.minY - viewHeight) / 2,
+    })
+  }
   const zoomPreview = (
     nextZoom: number,
     clientX?: number,
@@ -257,6 +302,64 @@ export function SvgImportDialog({
       ...Object.fromEntries([...ids].map((id) => [id, materialId])),
     }))
   }
+  const assignAll = (materialId: string) =>
+    setAssignments((current) => ({
+      ...current,
+      ...Object.fromEntries([...included].map((id) => [id, materialId])),
+    }))
+  const wizardObjects =
+    document?.objects.filter((object) => object.recommendedInclude !== false) ??
+    []
+  const wizardObject = wizardObjects[wizardIndex]
+  const startMaterialWizard = () => {
+    const candidateIds = new Set(wizardObjects.map((object) => object.id))
+    setMaterialWizard(true)
+    setWizardIndex(0)
+    setWizardReviewed(new Set())
+    setIncluded(new Set([...included].filter((id) => !candidateIds.has(id))))
+    setAssignments((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([id]) => !candidateIds.has(id)),
+      ),
+    )
+    if (wizardObjects[0]) {
+      setSelected(new Set([wizardObjects[0].id]))
+      focusObject(wizardObjects[0].id)
+    }
+  }
+  const showWizardObject = (index: number) => {
+    const next = Math.max(0, Math.min(wizardObjects.length - 1, index))
+    setWizardIndex(next)
+    const object = wizardObjects[next]
+    if (object) {
+      setSelected(new Set([object.id]))
+      focusObject(object.id)
+    }
+  }
+  const decideWizardObject = (materialId: string | null) => {
+    if (!wizardObject) return
+    setWizardReviewed((current) => new Set(current).add(wizardObject.id))
+    setIncluded((current) => {
+      const next = new Set(current)
+      if (materialId) next.add(wizardObject.id)
+      else next.delete(wizardObject.id)
+      return next
+    })
+    setAssignments((current) => {
+      const next = { ...current }
+      if (materialId) next[wizardObject.id] = materialId
+      else delete next[wizardObject.id]
+      return next
+    })
+    if (wizardIndex < wizardObjects.length - 1)
+      setTimeout(() => showWizardObject(wizardIndex + 1), 0)
+  }
+  const commonAssignment = (ids: Set<string>) => {
+    const values = [...ids].map((id) => assignments[id]).filter(Boolean)
+    return values.length === ids.size && new Set(values).size === 1
+      ? values[0]
+      : ''
+  }
   const finish = () => {
     if (!document) return
     const objects = document.objects
@@ -265,6 +368,20 @@ export function SvgImportDialog({
         name: object.name,
         groupName: object.groupName,
         materialId: assignments[object.id],
+        attachedOperations: object.attachedOperations?.map((operation) => ({
+          ...operation,
+          faces: operation.faces.map((face) => ({
+            ...face,
+            outer: face.outer.map(
+              ([x, y]) => [x * scaleX, y * scaleY] as [number, number],
+            ),
+            holes: face.holes.map((hole) =>
+              hole.map(
+                ([x, y]) => [x * scaleX, y * scaleY] as [number, number],
+              ),
+            ),
+          })),
+        })),
         faces: object.faces.map((face) => ({
           ...face,
           outer: face.outer.map(
@@ -275,8 +392,21 @@ export function SvgImportDialog({
           ),
         })),
       }))
-    importSvgObjects(document.fileName.replace(/\.svg$/i, ''), objects)
+    importSvgObjects(
+      document.fileName.replace(/\.(?:svg|dxf|lbrn|lbrn2)$/i, ''),
+      objects,
+    )
     close()
+  }
+  const downloadConvertedSvg = () => {
+    if (!document?.convertedSvg) return
+    const blob = new Blob([document.convertedSvg], { type: 'image/svg+xml' })
+    const url = URL.createObjectURL(blob)
+    const link = globalThis.document.createElement('a')
+    link.href = url
+    link.download = document.fileName.replace(/\.(?:dxf|lbrn|lbrn2)$/i, '.svg')
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
   const selectedCount = selected.size
   const chosenCount =
@@ -285,6 +415,8 @@ export function SvgImportDialog({
     document?.objects
       .filter((object) => included.has(object.id))
       .every((object) => assignments[object.id]) ?? false
+  const wizardComplete =
+    !materialWizard || wizardReviewed.size === wizardObjects.length
   return (
     <div
       className="svg-import-backdrop"
@@ -300,7 +432,14 @@ export function SvgImportDialog({
       >
         <header>
           <div>
-            <h2 id="svg-import-title">SVG-Vorlage importieren</h2>
+            <h2 id="svg-import-title">
+              {document?.sourceFormat === 'lbrn' ||
+              document?.sourceFormat === 'lbrn2'
+                ? 'LightBurn-Projekt importieren'
+                : document?.sourceFormat === 'dxf'
+                  ? 'DXF-Datei importieren'
+                  : 'Vektordatei importieren'}
+            </h2>
           </div>
           <button onClick={close} aria-label="Import schließen">
             <X />
@@ -333,16 +472,19 @@ export function SvgImportDialog({
                 setDragging(false)
                 void readFile(event.dataTransfer.files[0])
               }}
-              onClick={() => inputRef.current?.click()}
+              onClick={(event) => {
+                if (event.target === inputRef.current) return
+                inputRef.current?.click()
+              }}
             >
               <Upload />
-              <h3>SVG hier ablegen</h3>
+              <h3>Vektordatei hier ablegen</h3>
               <p>oder klicken, um eine Datei auszuwählen</p>
-              <button>SVG auswählen</button>
+              <button>Datei auswählen</button>
               <input
                 ref={inputRef}
                 type="file"
-                accept=".svg,image/svg+xml"
+                accept=".svg,.dxf,.lbrn,.lbrn2,image/svg+xml,application/dxf,application/xml,text/xml"
                 onChange={(event) => {
                   void readFile(event.target.files?.[0])
                   event.target.value = ''
@@ -381,32 +523,49 @@ export function SvgImportDialog({
                     preserveAspectRatio="xMidYMid meet"
                   >
                     {preview.map((object) => (
-                      <path
-                        key={object.id}
-                        d={object.path}
-                        fill={
-                          assignments[object.id]
-                            ? materials.find(
-                                (material) =>
-                                  material.id === assignments[object.id],
-                              )?.color
-                            : (object.color ?? '#d9a96c')
-                        }
-                        fillRule="evenodd"
-                        className={`${selected.has(object.id) ? 'selected' : ''}${included.has(object.id) ? '' : ' excluded'}`}
-                        onClick={() => {
-                          if (suppressPreviewClick.current) {
-                            suppressPreviewClick.current = false
-                            return
+                      <Fragment key={object.id}>
+                        {selectedPreviewIds.has(object.id) && (
+                          <path
+                            className="selection-halo"
+                            d={object.path}
+                            fill="none"
+                            fillRule="evenodd"
+                          />
+                        )}
+                        <path
+                          d={object.path}
+                          fill={
+                            assignments[object.id]
+                              ? materials.find(
+                                  (material) =>
+                                    material.id === assignments[object.id],
+                                )?.color
+                              : (object.color ?? '#d9a96c')
                           }
-                          setSelected((current) => {
-                            const next = new Set(current)
-                            if (next.has(object.id)) next.delete(object.id)
-                            else next.add(object.id)
-                            return next
-                          })
-                        }}
-                      />
+                          fillRule="evenodd"
+                          className={`${selectedPreviewIds.has(object.id) ? 'selected' : selectedCount ? 'dimmed' : ''}${included.has(object.id) || selectedPreviewIds.has(object.id) ? '' : ' excluded'}`}
+                          onClick={() => {
+                            if (suppressPreviewClick.current) {
+                              suppressPreviewClick.current = false
+                              return
+                            }
+                            if (
+                              selected.size === 1 &&
+                              selected.has(object.id)
+                            ) {
+                              setSelected(new Set())
+                              resetPreviewView()
+                              return
+                            }
+                            setSelected((current) => {
+                              const next = new Set(current)
+                              if (next.has(object.id)) next.delete(object.id)
+                              else next.add(object.id)
+                              return next
+                            })
+                          }}
+                        />
+                      </Fragment>
                     ))}
                   </svg>
                   <div
@@ -510,27 +669,146 @@ export function SvgImportDialog({
                       {selectedCount
                         ? `${selectedCount} Form${selectedCount === 1 ? '' : 'en'} ausgewählt`
                         : 'Keine Form ausgewählt'}{' '}
-                      · Klick auf ein Material weist es zu.
+                      · LightBurn-Farben sind Ebenenfarben und keine
+                      Materialangaben.
                     </p>
-                    <div className="svg-material-cards">
-                      {materials.map((material) => (
-                        <button
-                          key={material.id}
-                          onClick={() => assign(material.id)}
-                        >
-                          <i style={{ background: material.color }} />
+                    {document.estimatedThickness && (
+                      <div className="svg-thickness-estimate">
+                        <strong>
+                          Geschätzte Materialstärke:{' '}
+                          {document.estimatedThickness.mm.toFixed(1)} mm
+                        </strong>
+                        <span>
+                          Sicherheit: {document.estimatedThickness.confidence} ·{' '}
+                          aus {document.estimatedThickness.evidenceCount}{' '}
+                          wiederkehrenden Zinkenmaßen. Bitte vor dem Import
+                          bestätigen.
+                        </span>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className={`svg-wizard-toggle${materialWizard ? ' active' : ''}`}
+                      onClick={() => {
+                        if (materialWizard) {
+                          setMaterialWizard(false)
+                          setSelected(new Set())
+                          resetPreviewView()
+                        } else startMaterialWizard()
+                      }}
+                    >
+                      {materialWizard
+                        ? 'Materialwizard beenden'
+                        : 'Materialwizard verwenden'}
+                    </button>
+                    {materialWizard && wizardObject && (
+                      <div className="svg-material-wizard">
+                        <div className="svg-wizard-progress">
+                          <strong>
+                            Objekt {wizardIndex + 1} von {wizardObjects.length}
+                          </strong>
                           <span>
-                            <strong>{material.name}</strong>
-                            <small>
-                              {material.thickness} mm · Schnittfuge{' '}
-                              {material.kerf} mm
-                            </small>
+                            {wizardReviewed.size} vollständig kontrolliert
                           </span>
+                        </div>
+                        <h4>{wizardObject.name}</h4>
+                        <p>
+                          {wizardObject.groupName} ·{' '}
+                          {(
+                            (wizardObject.bounds.maxX -
+                              wizardObject.bounds.minX) *
+                            scaleX
+                          ).toFixed(1)}{' '}
+                          ×{' '}
+                          {(
+                            (wizardObject.bounds.maxY -
+                              wizardObject.bounds.minY) *
+                            scaleY
+                          ).toFixed(1)}{' '}
+                          mm
+                          {wizardObject.attachedOperations?.length
+                            ? ` · ${wizardObject.attachedOperations.length} zugeordnete Bearbeitung${wizardObject.attachedOperations.length === 1 ? '' : 'en'}`
+                            : ''}
+                        </p>
+                        <label>
+                          <span>Material festlegen und weiter</span>
+                          <select
+                            aria-label={`Materialwizard: Material für ${wizardObject.name}`}
+                            value={assignments[wizardObject.id] ?? ''}
+                            onChange={(event) =>
+                              decideWizardObject(event.target.value)
+                            }
+                          >
+                            <option value="">Material auswählen …</option>
+                            {materials.map((material) => (
+                              <option key={material.id} value={material.id}>
+                                {material.name} · {material.thickness} mm
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <button
+                          type="button"
+                          className="svg-wizard-disable"
+                          onClick={() => decideWizardObject(null)}
+                        >
+                          Dieses Objekt nicht importieren
                         </button>
-                      ))}
+                        <div className="svg-wizard-navigation">
+                          <button
+                            type="button"
+                            disabled={wizardIndex === 0}
+                            onClick={() => showWizardObject(wizardIndex - 1)}
+                          >
+                            Vorheriges Objekt
+                          </button>
+                          <button
+                            type="button"
+                            disabled={wizardIndex === wizardObjects.length - 1}
+                            onClick={() => showWizardObject(wizardIndex + 1)}
+                          >
+                            Nächstes Objekt
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <div
+                      className={`svg-material-assignment${materialWizard ? ' wizard-hidden' : ''}`}
+                    >
+                      <label>
+                        <span>Alle verwendeten Formen</span>
+                        <select
+                          aria-label="Material für alle verwendeten Formen"
+                          value={commonAssignment(included)}
+                          onChange={(event) => assignAll(event.target.value)}
+                        >
+                          <option value="">Material auswählen …</option>
+                          {materials.map((material) => (
+                            <option key={material.id} value={material.id}>
+                              {material.name} · {material.thickness} mm
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>Aktuelle Auswahl ({selectedCount})</span>
+                        <select
+                          aria-label="Material für ausgewählte Formen"
+                          disabled={!selectedCount}
+                          value={commonAssignment(selected)}
+                          onChange={(event) => assign(event.target.value)}
+                        >
+                          <option value="">Material auswählen …</option>
+                          {materials.map((material) => (
+                            <option key={material.id} value={material.id}>
+                              {material.name} · {material.thickness} mm
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
                     <button
-                      className="svg-select-all"
+                      className={`svg-select-all${materialWizard ? ' wizard-hidden' : ''}`}
                       onClick={() =>
                         setSelected(
                           new Set(
@@ -543,11 +821,17 @@ export function SvgImportDialog({
                     >
                       Alle verwendeten Formen auswählen
                     </button>
-                    <div className="svg-object-list">
+                    <div
+                      className={`svg-object-list${materialWizard ? ' wizard-hidden' : ''}`}
+                    >
                       {document.objects.map((object) => (
-                        <label key={object.id}>
+                        <div
+                          key={object.id}
+                          className={selected.has(object.id) ? 'selected' : ''}
+                        >
                           <input
                             type="checkbox"
+                            aria-label={`${object.name} importieren`}
                             checked={included.has(object.id)}
                             onChange={() =>
                               setIncluded((current) => {
@@ -570,22 +854,62 @@ export function SvgImportDialog({
                             }}
                           />
                           <span>
-                            {object.name}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (
+                                  selected.size === 1 &&
+                                  selected.has(object.id)
+                                ) {
+                                  setSelected(new Set())
+                                  resetPreviewView()
+                                  return
+                                }
+                                setSelected(new Set([object.id]))
+                                focusObject(object.id)
+                              }}
+                            >
+                              {object.name}
+                            </button>
                             <small>
-                              {object.groupName}
-                              {object.color
-                                ? ' · Farbe automatisch erkannt'
-                                : ''}
+                              {object.groupName} ·{' '}
+                              {(
+                                (object.bounds.maxX - object.bounds.minX) *
+                                scaleX
+                              ).toFixed(1)}{' '}
+                              ×{' '}
+                              {(
+                                (object.bounds.maxY - object.bounds.minY) *
+                                scaleY
+                              ).toFixed(1)}{' '}
+                              mm
                             </small>
                           </span>
-                          <strong>
-                            {materials.find(
-                              (material) =>
-                                material.id === assignments[object.id],
-                            )?.thickness ?? '–'}{' '}
-                            mm
-                          </strong>
-                        </label>
+                          <select
+                            aria-label={`Material für ${object.name}`}
+                            value={assignments[object.id] ?? ''}
+                            onChange={(event) =>
+                              setAssignments((current) => ({
+                                ...current,
+                                [object.id]: event.target.value,
+                              }))
+                            }
+                          >
+                            <option value="">Nicht zugewiesen</option>
+                            {materials.map((material) => (
+                              <option key={material.id} value={material.id}>
+                                {material.name} · {material.thickness} mm
+                                {document.estimatedThickness &&
+                                Math.abs(
+                                  material.thickness -
+                                    document.estimatedThickness.mm,
+                                ) <= 0.25
+                                  ? ' · passend zur Schätzung'
+                                  : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                       ))}
                     </div>
                   </>
@@ -660,7 +984,8 @@ export function SvgImportDialog({
               className="primary"
               disabled={
                 !document?.objects.length ||
-                (step === 3 && (!chosenCount || !allAssigned))
+                (step === 3 && (!chosenCount || !allAssigned)) ||
+                (step === 3 && !wizardComplete)
               }
               onClick={() => setStep(step + 1)}
             >
@@ -668,13 +993,20 @@ export function SvgImportDialog({
             </button>
           )}
           {step === 4 && (
-            <button
-              className="primary"
-              disabled={!chosenCount || !allAssigned}
-              onClick={finish}
-            >
-              <FileUp /> In 3D übernehmen
-            </button>
+            <>
+              {document?.convertedSvg && (
+                <button className="secondary" onClick={downloadConvertedSvg}>
+                  <FileUp /> Als SVG speichern
+                </button>
+              )}
+              <button
+                className="primary"
+                disabled={!chosenCount || !allAssigned}
+                onClick={finish}
+              >
+                <FileUp /> In 3D übernehmen
+              </button>
+            </>
           )}
         </footer>
       </section>

@@ -1,4 +1,6 @@
 import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js'
+import { convertLbrn2ToSvg, type Lbrn2CutSetting } from './lbrn2'
+import { convertDxfToSvg } from './dxfImport'
 import type { ContourFace, ContourPoint } from './box'
 
 export type SvgImportWarning = {
@@ -13,6 +15,18 @@ export type SvgImportObject = {
   color: string | null
   faces: ContourFace[]
   bounds: { minX: number; minY: number; maxX: number; maxY: number }
+  sourceLayer?: string
+  sourceOperation?: string
+  sourceShapeType?: string
+  recommendedInclude?: boolean
+  attachedOperations?: SvgImportOperation[]
+}
+export type SvgImportOperation = {
+  id: string
+  name: string
+  operation: string
+  shapeType?: string
+  faces: ContourFace[]
 }
 export type SvgImportDocument = {
   fileName: string
@@ -23,6 +37,18 @@ export type SvgImportDocument = {
   widthMm: number
   heightMm: number
   hasReliableSize: boolean
+  sourceFormat?: 'svg' | 'dxf' | 'lbrn' | 'lbrn2'
+  convertedSvg?: string
+  lightBurn?: {
+    appVersion: string
+    deviceName: string
+    cutSettings: Lbrn2CutSetting[]
+  }
+  estimatedThickness?: {
+    mm: number
+    confidence: 'hoch' | 'mittel'
+    evidenceCount: number
+  }
 }
 
 const area = (ring: ContourPoint[]) =>
@@ -143,9 +169,18 @@ export function parseSvgImport(
 
   loaderResult.paths.forEach((path, pathIndex) => {
     const node = path.userData?.node as Element | undefined
-    const name = labelOf(node, `Form ${pathIndex + 1}`)
+    const layerName = node?.getAttribute('data-layer') || ''
+    const cutIndex = node?.getAttribute('data-cut-index')
+    const sourceOperation = node?.getAttribute('data-operation') || undefined
+    const sourceShapeType = node?.getAttribute('data-shape-type') || undefined
+    const fallbackName = layerName
+      ? `${layerName} · Form ${pathIndex + 1}`
+      : `Form ${pathIndex + 1}`
+    const name = labelOf(node, fallbackName)
     const groupNode = node?.parentElement?.closest('g') ?? undefined
-    const groupName = labelOf(groupNode, fileName.replace(/\.svg$/i, ''))
+    const groupName = layerName
+      ? `${layerName}${cutIndex != null ? ` (C${cutIndex.padStart(2, '0')})` : ''}`
+      : labelOf(groupNode, fileName.replace(/\.svg$/i, ''))
     const style = path.userData?.style as Record<string, unknown> | undefined
     const fill = style?.fill ?? node?.getAttribute('fill')
     const stroke = style?.stroke ?? node?.getAttribute('stroke')
@@ -209,6 +244,9 @@ export function parseSvgImport(
         maxX: Math.max(...points.map((point) => point[0])),
         maxY: Math.max(...points.map((point) => point[1])),
       },
+      sourceLayer: layerName || undefined,
+      sourceOperation,
+      sourceShapeType,
     })
   })
 
@@ -249,5 +287,223 @@ export function parseSvgImport(
     widthMm: contentWidth * ratioScale,
     heightMm: contentHeight * ratioScale,
     hasReliableSize,
+  }
+}
+
+const boundsArea = (object: SvgImportObject) =>
+  (object.bounds.maxX - object.bounds.minX) *
+  (object.bounds.maxY - object.bounds.minY)
+
+const containsCenter = (
+  container: SvgImportObject,
+  candidate: SvgImportObject,
+) => {
+  const x = (candidate.bounds.minX + candidate.bounds.maxX) / 2
+  const y = (candidate.bounds.minY + candidate.bounds.maxY) / 2
+  return (
+    x >= container.bounds.minX &&
+    x <= container.bounds.maxX &&
+    y >= container.bounds.minY &&
+    y <= container.bounds.maxY
+  )
+}
+
+function estimateFingerThickness(objects: SvgImportObject[]) {
+  const counts = new Map<number, number>()
+  for (const object of objects) {
+    const width = object.bounds.maxX - object.bounds.minX
+    const height = object.bounds.maxY - object.bounds.minY
+    if (width < 20 || height < 20) continue
+    for (const face of object.faces)
+      face.outer.forEach((point, index) => {
+        const next = face.outer[(index + 1) % face.outer.length]
+        const dx = Math.abs(next[0] - point[0])
+        const dy = Math.abs(next[1] - point[1])
+        const length = dx < 0.02 ? dy : dy < 0.02 ? dx : 0
+        if (length < 1 || length > 12) return
+        const bucket = Math.round(length * 10) / 10
+        counts.set(bucket, (counts.get(bucket) ?? 0) + 1)
+      })
+  }
+  const best = [...counts].sort(
+    ([firstLength, firstCount], [secondLength, secondCount]) =>
+      secondCount - firstCount || firstLength - secondLength,
+  )[0]
+  if (!best || best[1] < 4) return undefined
+  return {
+    mm: best[0],
+    confidence: best[1] >= 8 ? ('hoch' as const) : ('mittel' as const),
+    evidenceCount: best[1],
+  }
+}
+
+function prepareLightBurnObjects(objects: SvgImportObject[]) {
+  const prepared = objects.map((object) => ({ ...object }))
+  const materialParts = prepared.filter(
+    (object) =>
+      object.sourceOperation?.toLowerCase() === 'cut' &&
+      object.sourceShapeType !== 'Text',
+  )
+  for (const object of prepared) {
+    object.recommendedInclude = materialParts.includes(object)
+    if (object.recommendedInclude) object.attachedOperations = []
+  }
+  const operations = prepared.filter(
+    (object) => !materialParts.includes(object),
+  )
+  let attachedOperationCount = 0
+  for (const operation of operations) {
+    const target = materialParts
+      .filter((part) => containsCenter(part, operation))
+      .sort((first, second) => boundsArea(first) - boundsArea(second))[0]
+    if (!target) continue
+    target.attachedOperations!.push({
+      id: operation.id,
+      name: operation.name,
+      operation: operation.sourceOperation ?? 'Unbekannt',
+      shapeType: operation.sourceShapeType,
+      faces: operation.faces,
+    })
+    attachedOperationCount += 1
+  }
+  return {
+    objects: prepared,
+    estimatedThickness: estimateFingerThickness(materialParts),
+    attachedOperationCount,
+    unattachedOperationCount: operations.length - attachedOperationCount,
+  }
+}
+
+export function parseLbrn2Import(
+  contents: string,
+  fileName = 'LightBurn-Projekt.lbrn2',
+): SvgImportDocument {
+  const conversion = convertLbrn2ToSvg(contents)
+  const parsed = parseSvgImport(
+    conversion.svg,
+    fileName.replace(/\.lbrn2$/i, '.svg'),
+  )
+  const prepared = prepareLightBurnObjects(parsed.objects)
+  return {
+    ...parsed,
+    objects: prepared.objects,
+    fileName,
+    sourceFormat: 'lbrn2',
+    convertedSvg: conversion.svg,
+    lightBurn: {
+      appVersion: conversion.appVersion,
+      deviceName: conversion.deviceName,
+      cutSettings: conversion.cutSettings,
+    },
+    estimatedThickness: prepared.estimatedThickness,
+    warnings: [
+      ...(prepared.attachedOperationCount
+        ? [
+            {
+              kind: 'warning' as const,
+              message: `${prepared.attachedOperationCount} Gravur- oder Textobjekt${prepared.attachedOperationCount === 1 ? '' : 'e'} wurden den zugehörigen Bauteilen als Bearbeitungen zugeordnet.`,
+            },
+          ]
+        : []),
+      ...(prepared.unattachedOperationCount
+        ? [
+            {
+              kind: 'warning' as const,
+              message: `${prepared.unattachedOperationCount} Gravur- oder Textobjekt${prepared.unattachedOperationCount === 1 ? '' : 'e'} konnte keinem Bauteil eindeutig zugeordnet werden und bleibt zur manuellen Kontrolle sichtbar.`,
+            },
+          ]
+        : []),
+      ...conversion.warnings.map((message) => ({
+        kind: 'warning' as const,
+        message,
+      })),
+      ...parsed.warnings,
+    ],
+  }
+}
+
+export function parseLbrnImport(
+  contents: string,
+  fileName = 'LightBurn-Projekt.lbrn',
+): SvgImportDocument {
+  const conversion = convertLbrn2ToSvg(contents)
+  const parsed = parseSvgImport(
+    conversion.svg,
+    fileName.replace(/\.lbrn$/i, '.svg'),
+  )
+  const prepared = prepareLightBurnObjects(parsed.objects)
+  return {
+    ...parsed,
+    objects: prepared.objects,
+    fileName,
+    sourceFormat: 'lbrn',
+    convertedSvg: conversion.svg,
+    lightBurn: {
+      appVersion: conversion.appVersion,
+      deviceName: conversion.deviceName,
+      cutSettings: conversion.cutSettings,
+    },
+    estimatedThickness: prepared.estimatedThickness,
+    warnings: [
+      ...(prepared.attachedOperationCount
+        ? [
+            {
+              kind: 'warning' as const,
+              message: `${prepared.attachedOperationCount} Gravur- oder Textobjekt${prepared.attachedOperationCount === 1 ? '' : 'e'} wurden den zugehörigen Bauteilen als Bearbeitungen zugeordnet.`,
+            },
+          ]
+        : []),
+      ...(prepared.unattachedOperationCount
+        ? [
+            {
+              kind: 'warning' as const,
+              message: `${prepared.unattachedOperationCount} Gravur- oder Textobjekt${prepared.unattachedOperationCount === 1 ? '' : 'e'} konnte keinem Bauteil eindeutig zugeordnet werden und bleibt zur manuellen Kontrolle sichtbar.`,
+            },
+          ]
+        : []),
+      ...conversion.warnings.map((message) => ({
+        kind: 'warning' as const,
+        message,
+      })),
+      ...parsed.warnings,
+    ],
+  }
+}
+
+export function parseDxfImport(
+  contents: string,
+  fileName = 'Zeichnung.dxf',
+): SvgImportDocument {
+  const conversion = convertDxfToSvg(contents)
+  const parsed = parseSvgImport(
+    conversion.svg,
+    fileName.replace(/\.dxf$/i, '.svg'),
+  )
+  return {
+    ...parsed,
+    fileName,
+    sourceFormat: 'dxf',
+    convertedSvg: conversion.svg,
+    hasReliableSize: conversion.hasReliableSize,
+    warnings: [
+      ...(!conversion.hasReliableSize
+        ? [
+            {
+              kind: 'warning' as const,
+              message:
+                'Die DXF-Datei enthält keine eindeutige Einheit. Bitte Breite und Höhe vor dem Import prüfen.',
+            },
+          ]
+        : []),
+      ...conversion.warnings.map((message) => ({
+        kind: 'warning' as const,
+        message,
+      })),
+      ...parsed.warnings.filter(
+        (warning) =>
+          conversion.hasReliableSize ||
+          !warning.message.startsWith('Die SVG enthält keine eindeutige Größe'),
+      ),
+    ],
   }
 }

@@ -61,6 +61,19 @@ function mapContourGeometryToPanel(
 
 function baseGeometry(panel: PanelDefinition): BufferGeometry {
   const panelShape = panel.shape ?? { type: 'rectangle' as const }
+  if (panelShape.type !== 'free' && panelShape.editedFaces?.length) {
+    const thickness = panel.size[thinAxis(panel)]
+    const geometry = new ExtrudeGeometry(
+      contourShapes(panelShape.editedFaces),
+      {
+        depth: thickness,
+        bevelEnabled: false,
+        steps: 1,
+      },
+    )
+    geometry.translate(0, 0, -thickness / 2)
+    return mapContourGeometryToPanel(geometry, panel)
+  }
   if (panelShape.type === 'rectangle') return new BoxGeometry(...panel.size)
   if (panelShape.type === 'free') {
     const thickness = panel.size[thinAxis(panel)]
@@ -73,6 +86,18 @@ function baseGeometry(panel: PanelDefinition): BufferGeometry {
     return mapContourGeometryToPanel(geometry, panel)
   }
   if (panelShape.type === 'text') {
+    if (panelShape.editedFaces?.length) {
+      const geometry = new ExtrudeGeometry(
+        contourShapes(panelShape.editedFaces),
+        {
+          depth: panel.size[2],
+          bevelEnabled: false,
+          steps: 1,
+        },
+      )
+      geometry.translate(0, 0, -panel.size[2] / 2)
+      return geometry
+    }
     if (!panelShape.outline?.commands.length)
       return new BoxGeometry(0.1, 0.1, panel.size[2])
     const geometry = new ExtrudeGeometry(
@@ -152,10 +177,32 @@ function featureGeometry(feature: JointFeature) {
   return geometry
 }
 
+function importedOperationGeometry(
+  panel: PanelDefinition,
+  operation: NonNullable<PanelDefinition['importedOperations']>[number],
+) {
+  const thickness = panel.size[thinAxis(panel)]
+  const cutsThrough = operation.operation.toLowerCase() === 'cut'
+  const depth = cutsThrough
+    ? thickness + 0.2
+    : Math.min(0.3, Math.max(0.05, thickness * 0.15))
+  const geometry = new ExtrudeGeometry(contourShapes(operation.faces), {
+    depth,
+    bevelEnabled: false,
+    steps: 1,
+  })
+  geometry.translate(
+    0,
+    0,
+    cutsThrough ? -thickness / 2 - 0.1 : thickness / 2 - depth,
+  )
+  return mapContourGeometryToPanel(geometry, panel)
+}
+
 function evaluateBatch(
   evaluator: Evaluator,
   current: Brush,
-  geometries: ReturnType<typeof featureGeometry>[],
+  geometries: BufferGeometry[],
   operation: typeof ADDITION | typeof SUBTRACTION,
 ) {
   if (!geometries.length) return current
@@ -200,9 +247,13 @@ export function createPanelGeometry(panel: PanelDefinition) {
         feature.operation === 'subtract' && feature.shape === 'cylinder',
     )
     .map(featureGeometry)
+  const importedSubtractions = (panel.importedOperations ?? []).map(
+    (operation) => importedOperationGeometry(panel, operation),
+  )
   result = evaluateBatch(evaluator, result, additions, ADDITION)
   result = evaluateBatch(evaluator, result, boxSubtractions, SUBTRACTION)
   result = evaluateBatch(evaluator, result, reliefSubtractions, SUBTRACTION)
+  result = evaluateBatch(evaluator, result, importedSubtractions, SUBTRACTION)
 
   result.geometry.computeVertexNormals()
   return result.geometry
@@ -426,6 +477,7 @@ export function panelGeometryKey(
     panel.shape,
     panel.cuts,
     panel.jointFeatures,
+    panel.importedOperations,
   ])
   const targetInverse = objectMatrix(panel).invert()
   const modifiers = panel.booleanModifiers

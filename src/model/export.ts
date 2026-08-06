@@ -1,5 +1,5 @@
 import JSZip from 'jszip'
-import type { BufferGeometry } from 'three'
+import { Euler, Quaternion, Vector3, type BufferGeometry } from 'three'
 import {
   thinAxis,
   type LaserTextDefinition,
@@ -7,6 +7,7 @@ import {
   type PanelDefinition,
 } from './box'
 import { createEvaluatedPanelGeometry } from './panelGeometry'
+import { createLbrn2Project } from './lbrn2'
 
 export type ExportOperation =
   'engrave-fill' | 'engrave-line' | 'score' | 'cut-inner' | 'cut-outer' | 'tool'
@@ -467,9 +468,291 @@ const escapeXml = (value: string) =>
   )
 const path = (loop: Point[], offset: Point) =>
   `M ${loop.map(([x, y]) => `${(x + offset[0]).toFixed(3)},${(y + offset[1]).toFixed(3)}`).join(' L ')} Z`
+
+const dxfValue = (value: string | number) => `${value}`.replace(/[\r\n]/g, ' ')
+const dxfPair = (code: number, value: string | number) =>
+  `${code}\n${dxfValue(value)}\n`
+const dxfNumber = (value: number) =>
+  Number.isFinite(value) ? Number(value.toFixed(6)) : 0
+const dxfColor = (color: string) => {
+  const match = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(color)
+  return match
+    ? (Number.parseInt(match[1], 16) << 16) |
+        (Number.parseInt(match[2], 16) << 8) |
+        Number.parseInt(match[3], 16)
+    : 0
+}
+const dxfLayerName = (order: number, name: string) =>
+  `${String(order + 1).padStart(2, '0')}_${safeName(name)}`.slice(0, 255)
+
+type DxfLayer = { name: string; color: string }
+type DxfPolyline = {
+  layer: string
+  color: string
+  loop: Point[]
+  offset: Point
+}
+
+/** ASCII DXF 2000 with millimetre units and closed lightweight polylines.
+ * True-colour values preserve the LightBurn layer colours while the layer
+ * table keeps processing steps separate in other CAD applications as well. */
+function createDxf(
+  layers: DxfLayer[],
+  polylines: DxfPolyline[],
+  width: number,
+  height: number,
+) {
+  const header =
+    dxfPair(0, 'SECTION') +
+    dxfPair(2, 'HEADER') +
+    dxfPair(9, '$ACADVER') +
+    dxfPair(1, 'AC1015') +
+    dxfPair(9, '$INSUNITS') +
+    dxfPair(70, 4) +
+    dxfPair(9, '$EXTMIN') +
+    dxfPair(10, 0) +
+    dxfPair(20, 0) +
+    dxfPair(30, 0) +
+    dxfPair(9, '$EXTMAX') +
+    dxfPair(10, dxfNumber(width)) +
+    dxfPair(20, dxfNumber(height)) +
+    dxfPair(30, 0) +
+    dxfPair(0, 'ENDSEC')
+  const layerTable =
+    dxfPair(0, 'SECTION') +
+    dxfPair(2, 'TABLES') +
+    dxfPair(0, 'TABLE') +
+    dxfPair(2, 'LAYER') +
+    dxfPair(70, layers.length) +
+    layers
+      .map(
+        (layer) =>
+          dxfPair(0, 'LAYER') +
+          dxfPair(2, layer.name) +
+          dxfPair(70, 0) +
+          dxfPair(62, 7) +
+          dxfPair(420, dxfColor(layer.color)) +
+          dxfPair(6, 'CONTINUOUS'),
+      )
+      .join('') +
+    dxfPair(0, 'ENDTAB') +
+    dxfPair(0, 'ENDSEC')
+  const entities =
+    dxfPair(0, 'SECTION') +
+    dxfPair(2, 'ENTITIES') +
+    polylines
+      .filter(({ loop }) => loop.length >= 2)
+      .map(
+        ({ layer, color, loop, offset }) =>
+          dxfPair(0, 'LWPOLYLINE') +
+          dxfPair(100, 'AcDbEntity') +
+          dxfPair(8, layer) +
+          dxfPair(420, dxfColor(color)) +
+          dxfPair(100, 'AcDbPolyline') +
+          dxfPair(90, loop.length) +
+          dxfPair(70, 1) +
+          loop
+            .map(
+              ([x, y]) =>
+                dxfPair(10, dxfNumber(x + offset[0])) +
+                dxfPair(20, dxfNumber(height - y - offset[1])),
+            )
+            .join(''),
+      )
+      .join('') +
+    dxfPair(0, 'ENDSEC')
+  return `${header}${layerTable}${entities}${dxfPair(0, 'EOF')}`
+}
+
+type PackableItem = { contours: PanelContours }
+
+type ExportItem = PackableItem & { panel: PanelDefinition }
+
+const panelQuaternion = (panel: PanelDefinition) =>
+  new Quaternion().setFromEuler(new Euler(...panel.rotation, 'XYZ'))
+
+const isStandaloneEngraving = (panel: PanelDefinition) =>
+  panel.autoCut === false && Boolean(panel.processingAssignments?.length)
+
+/** Projects engraving-only geometry onto overlapping cut geometry. Depth is
+ * intentionally ignored: the laser job is two-dimensional, so an engraving
+ * may sit on, inside, or through its host in the 3D editor. */
+function attachEngravingsToHosts(items: ExportItem[]) {
+  const hosts = items.filter((item) => !isStandaloneEngraving(item.panel))
+  const hostByEngraving = new Map<
+    string,
+    { host: ExportItem; contours: PanelContours }
+  >()
+
+  for (const engraving of items.filter((item) =>
+    isStandaloneEngraving(item.panel),
+  )) {
+    const engravingQuaternion = panelQuaternion(engraving.panel)
+    const engravingThin = thinAxis(engraving.panel)
+    const engravingAxes = ([0, 1, 2] as const).filter(
+      (axis) => axis !== engravingThin,
+    )
+    const engravingNormal = new Vector3(0, 0, 0)
+    engravingNormal.setComponent(engravingThin, 1)
+    engravingNormal.applyQuaternion(engravingQuaternion).normalize()
+
+    const candidates = hosts
+      .map((host) => {
+        const hostThin = thinAxis(host.panel)
+        const hostAxes = ([0, 1, 2] as const).filter(
+          (axis) => axis !== hostThin,
+        )
+        const hostQuaternion = panelQuaternion(host.panel)
+        const hostNormal = new Vector3(0, 0, 0)
+        hostNormal.setComponent(hostThin, 1)
+        hostNormal.applyQuaternion(hostQuaternion).normalize()
+        const aligned = Math.abs(engravingNormal.dot(hostNormal)) > 0.98
+        const inverseHostQuaternion = hostQuaternion.clone().invert()
+        const hostPosition = new Vector3(...host.panel.position)
+        const engravingPosition = new Vector3(...engraving.panel.position)
+        const transformLoop = (loop: Point[]) =>
+          loop.map(([x, y]) => {
+            const local = new Vector3()
+            local.setComponent(engravingAxes[0], x + engraving.contours.minX)
+            local.setComponent(engravingAxes[1], engraving.contours.maxY - y)
+            const inHost = local
+              .applyQuaternion(engravingQuaternion)
+              .add(engravingPosition)
+              .sub(hostPosition)
+              .applyQuaternion(inverseHostQuaternion)
+            return [
+              inHost.getComponent(hostAxes[0]) - host.contours.minX,
+              host.contours.maxY - inHost.getComponent(hostAxes[1]),
+            ] as Point
+          })
+        const projectedContours: PanelContours = {
+          ...engraving.contours,
+          outer: engraving.contours.outer.map(transformLoop),
+          inner: engraving.contours.inner.map(transformLoop),
+        }
+        const projectedPoints = [
+          ...projectedContours.outer,
+          ...projectedContours.inner,
+        ].flat()
+        const minX = Math.min(...projectedPoints.map((point) => point[0]))
+        const maxX = Math.max(...projectedPoints.map((point) => point[0]))
+        const minY = Math.min(...projectedPoints.map((point) => point[1]))
+        const maxY = Math.max(...projectedPoints.map((point) => point[1]))
+        const overlapWidth = Math.max(
+          0,
+          Math.min(maxX, host.contours.width) - Math.max(minX, 0),
+        )
+        const overlapHeight = Math.max(
+          0,
+          Math.min(maxY, host.contours.height) - Math.max(minY, 0),
+        )
+        const overlapArea = overlapWidth * overlapHeight
+        const projectedArea = Math.max(0.000001, (maxX - minX) * (maxY - minY))
+        return {
+          host,
+          contours: projectedContours,
+          overlapArea,
+          overlapRatio: overlapArea / projectedArea,
+          hostArea: host.contours.width * host.contours.height,
+          eligible: aligned && overlapWidth > 0.001 && overlapHeight > 0.001,
+        }
+      })
+      .filter((candidate) => candidate.eligible)
+      .sort(
+        (a, b) =>
+          b.overlapRatio - a.overlapRatio ||
+          b.overlapArea - a.overlapArea ||
+          a.hostArea - b.hostArea,
+      )
+
+    const match = candidates[0]
+    if (!match) continue
+    hostByEngraving.set(engraving.panel.id, {
+      host: match.host,
+      contours: match.contours,
+    })
+  }
+  return { hosts, hostByEngraving }
+}
+
+/**
+ * Arrange parts on compact shelves. The old exporter put every part into one
+ * endlessly wide row, which made both the preview and the resulting job hard
+ * to use. Sorting tall parts first keeps shelf heights stable and gives a
+ * deterministic, reasonably square layout without rotating user geometry.
+ */
+function packItems<T extends PackableItem>(items: T[], gap = 10, margin = 10) {
+  if (!items.length)
+    return { placed: [] as Array<T & { offset: Point }>, width: 20, height: 20 }
+
+  const totalArea = items.reduce(
+    (sum, item) => sum + item.contours.width * item.contours.height,
+    0,
+  )
+  const widest = Math.max(...items.map((item) => item.contours.width))
+  const targetWidth = Math.max(widest, Math.sqrt(totalArea * 1.5))
+  const sorted = items
+    .map((item, index) => ({ item, index }))
+    .sort(
+      (a, b) =>
+        b.item.contours.height - a.item.contours.height ||
+        b.item.contours.width - a.item.contours.width ||
+        a.index - b.index,
+    )
+
+  let cursorX = margin
+  let cursorY = margin
+  let rowHeight = 0
+  let usedWidth = 0
+  const placed = sorted.map(({ item }) => {
+    if (
+      cursorX > margin &&
+      cursorX + item.contours.width > margin + targetWidth
+    ) {
+      cursorX = margin
+      cursorY += rowHeight + gap
+      rowHeight = 0
+    }
+    const offset: Point = [cursorX, cursorY]
+    cursorX += item.contours.width + gap
+    rowHeight = Math.max(rowHeight, item.contours.height)
+    usedWidth = Math.max(usedWidth, cursorX - gap)
+    return { ...item, offset }
+  })
+
+  return {
+    placed,
+    width: Math.max(20, usedWidth + margin),
+    height: Math.max(20, cursorY + rowHeight + margin),
+  }
+}
+
+function placeExportItems(items: ExportItem[], gap = 10, margin = 10) {
+  const { hosts, hostByEngraving } = attachEngravingsToHosts(items)
+  const unattached = items.filter(
+    (item) =>
+      !isStandaloneEngraving(item.panel) || !hostByEngraving.has(item.panel.id),
+  )
+  const packed = packItems(unattached, gap, margin)
+  const placedById = new Map(
+    packed.placed.map((item) => [item.panel.id, item] as const),
+  )
+  const attached = [...hostByEngraving.entries()].flatMap(
+    ([engravingId, attachment]) => {
+      const engraving = items.find((item) => item.panel.id === engravingId)
+      const host = placedById.get(attachment.host.panel.id)
+      return engraving && host
+        ? [{ ...engraving, contours: attachment.contours, offset: host.offset }]
+        : []
+    },
+  )
+  return { ...packed, placed: [...packed.placed, ...attached], hosts }
+}
 const safeName = (value: string) =>
   value
     .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .replace(/ß/g, 'ss')
     .replace(/[^a-zA-Z0-9_-]+/g, '_')
     .replace(/^_+|_+$/g, '') || 'Material'
 
@@ -650,17 +933,7 @@ export function createProfiledMaterialSvg(
     .filter((panel) => !panel.hidden && panel.visible !== false)
     .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
     .filter((item) => item.contours.outer.length || item.contours.inner.length)
-  let cursorX = margin
-  const placed = items.map((item) => {
-    const offset: Point = [cursorX, margin]
-    cursorX += item.contours.width + gap
-    return { ...item, offset }
-  })
-  const width = Math.max(20, cursorX - gap + margin),
-    height = Math.max(
-      20,
-      ...placed.map((item) => item.contours.height + margin * 2),
-    )
+  const { placed, width, height } = placeExportItems(items, gap, margin)
   const steps = buildProjectExportSteps(
     material,
     materialPanels,
@@ -706,6 +979,98 @@ export function createProfiledMaterialSvg(
   return `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${width}mm" height="${height}mm" viewBox="0 0 ${width} ${height}"><metadata>${escapeXml(JSON.stringify({ material, steps }))}</metadata>${svgGroups}</svg>`
 }
 
+export function createProfiledMaterialDxf(
+  material: MaterialDefinition,
+  materialPanels: PanelDefinition[],
+  allPanels: PanelDefinition[],
+  profiles: ProcessingProfile[],
+  recipes: ProcessingRecipe[],
+  laserId: string,
+  cutPreset?: LaserPreset | CutPresets,
+  contoursFor: ContourProvider = extractPanelContours,
+) {
+  const items = materialPanels
+    .filter((panel) => !panel.hidden && panel.visible !== false)
+    .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
+    .filter((item) => item.contours.outer.length || item.contours.inner.length)
+  const { placed, width, height } = placeExportItems(items, 10, 10)
+  const steps = buildProjectExportSteps(
+    material,
+    materialPanels,
+    profiles,
+    recipes,
+    laserId,
+    cutPreset,
+    contoursFor,
+  )
+  const dxfLayers = steps.map((step, index) => ({
+    name: dxfLayerName(index, step.name),
+    color: step.color,
+  }))
+  const polylines = steps.flatMap((step, index) =>
+    placed.flatMap((item): DxfPolyline[] => {
+      if (!step.objectIds.includes(item.panel.id)) return []
+      const loops =
+        step.kind === 'cut-inner'
+          ? item.contours.inner
+          : step.kind === 'cut-outer'
+            ? item.contours.outer
+            : [...item.contours.outer, ...item.contours.inner]
+      return loops.map((loop) => ({
+        layer: dxfLayers[index].name,
+        color: step.color,
+        loop,
+        offset: item.offset,
+      }))
+    }),
+  )
+  return createDxf(dxfLayers, polylines, width, height)
+}
+
+export function createProfiledMaterialLbrn2(
+  material: MaterialDefinition,
+  materialPanels: PanelDefinition[],
+  allPanels: PanelDefinition[],
+  profiles: ProcessingProfile[],
+  recipes: ProcessingRecipe[],
+  laser: LaserCutterDefinition,
+  cutPreset?: LaserPreset | CutPresets,
+  contoursFor: ContourProvider = extractPanelContours,
+) {
+  const items = materialPanels
+    .filter((panel) => !panel.hidden && panel.visible !== false)
+    .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
+    .filter((item) => item.contours.outer.length || item.contours.inner.length)
+  const { placed } = placeExportItems(items, 10, 10)
+  const steps = buildProjectExportSteps(
+    material,
+    materialPanels,
+    profiles,
+    recipes,
+    laser.id,
+    cutPreset,
+    contoursFor,
+  )
+  const shapes = steps.flatMap((step, cutIndex) =>
+    placed.flatMap((item) => {
+      if (!step.objectIds.includes(item.panel.id)) return []
+      const loops =
+        step.kind === 'cut-inner'
+          ? item.contours.inner
+          : step.kind === 'cut-outer'
+            ? item.contours.outer
+            : [...item.contours.outer, ...item.contours.inner]
+      return loops.map((loop) => ({
+        cutIndex,
+        loop: loop.map(
+          ([x, y]) => [x + item.offset[0], y + item.offset[1]] as Point,
+        ),
+      }))
+    }),
+  )
+  return createLbrn2Project(shapes, steps, laser.name)
+}
+
 export function createMaterialSvg(
   material: MaterialDefinition,
   materialPanels: PanelDefinition[],
@@ -723,17 +1088,7 @@ export function createMaterialSvg(
       contours: extractPanelContours(panel, allPanels),
     }))
     .filter((item) => item.contours.outer.length || item.contours.inner.length)
-  let cursorX = margin
-  const placed = items.map((item) => {
-    const offset: Point = [cursorX, margin]
-    cursorX += item.contours.width + gap
-    return { ...item, offset }
-  })
-  const width = Math.max(20, cursorX - gap + margin),
-    height = Math.max(
-      20,
-      ...placed.map((item) => item.contours.height + margin * 2),
-    )
+  const { placed, width, height } = placeExportItems(items, gap, margin)
   const materialLayers = layers
     .filter((layer) => layer.materialId === material.id)
     .sort((a, b) => a.order - b.order)
@@ -812,6 +1167,52 @@ export function createMaterialSvg(
   return `<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${width}mm" height="${height}mm" viewBox="0 0 ${width} ${height}"><metadata>${escapeXml(JSON.stringify({ material, layers: materialLayers }))}</metadata>${svgLayerGroups}</svg>`
 }
 
+export function createMaterialDxf(
+  material: MaterialDefinition,
+  materialPanels: PanelDefinition[],
+  allPanels: PanelDefinition[],
+  layers: ExportLayerDefinition[],
+  contoursFor: ContourProvider = extractPanelContours,
+) {
+  const items = materialPanels
+    .filter((panel) => !panel.hidden && panel.visible !== false)
+    .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
+    .filter((item) => item.contours.outer.length || item.contours.inner.length)
+  const { placed, width, height } = placeExportItems(items, 10, 10)
+  const materialLayers = layers
+    .filter((layer) => layer.materialId === material.id && layer.output)
+    .sort((a, b) => a.order - b.order)
+  const dxfLayers = materialLayers.map((layer, index) => ({
+    name: dxfLayerName(index, layer.name),
+    color: layer.color,
+  }))
+  const polylines = materialLayers.flatMap((layer, index) =>
+    placed.flatMap((item): DxfPolyline[] => {
+      const textShape =
+        item.panel.shape?.type === 'text' ? item.panel.shape : null
+      const loops =
+        textShape &&
+        textShape.operation !== 'cut' &&
+        layer.operation === textShape.operation
+          ? [...item.contours.outer, ...item.contours.inner]
+          : layer.operation === 'cut-inner' &&
+              (!textShape || textShape.operation === 'cut')
+            ? item.contours.inner
+            : layer.operation === 'cut-outer' &&
+                (!textShape || textShape.operation === 'cut')
+              ? item.contours.outer
+              : []
+      return loops.map((loop) => ({
+        layer: dxfLayers[index].name,
+        color: layer.color,
+        loop,
+        offset: item.offset,
+      }))
+    }),
+  )
+  return createDxf(dxfLayers, polylines, width, height)
+}
+
 export async function createExportPackage(
   materials: MaterialDefinition[],
   panels: PanelDefinition[],
@@ -851,16 +1252,18 @@ export async function createExportPackage(
           preset.operation === 'cut-outer',
       ),
     }
+    const baseName = `${safeName(material.name)}_${material.thickness}mm`
+    const profiled = Boolean(processingProfiles && laser)
     zip.file(
-      `${safeName(material.name)}_${material.thickness}mm.svg`,
-      processingProfiles && laser
+      `${baseName}.svg`,
+      profiled
         ? createProfiledMaterialSvg(
             material,
             materialPanels,
             panels,
-            processingProfiles,
+            processingProfiles!,
             processingRecipes,
-            laser.id,
+            laser!.id,
             cutPreset,
             groups,
             contoursFor,
@@ -874,6 +1277,41 @@ export async function createExportPackage(
             laserTexts,
           ),
     )
+    zip.file(
+      `${baseName}.dxf`,
+      profiled
+        ? createProfiledMaterialDxf(
+            material,
+            materialPanels,
+            panels,
+            processingProfiles!,
+            processingRecipes,
+            laser!.id,
+            cutPreset,
+            contoursFor,
+          )
+        : createMaterialDxf(
+            material,
+            materialPanels,
+            panels,
+            layers,
+            contoursFor,
+          ),
+    )
+    if (profiled)
+      zip.file(
+        `${baseName}.lbrn2`,
+        createProfiledMaterialLbrn2(
+          material,
+          materialPanels,
+          panels,
+          processingProfiles!,
+          processingRecipes,
+          laser!,
+          cutPreset,
+          contoursFor,
+        ),
+      )
   }
   const parts = panels
     .filter((panel) => !panel.hidden)
@@ -922,7 +1360,7 @@ export async function createExportPackage(
     JSON.stringify(
       {
         format: 'lasercut-studio-export',
-        version: 3,
+        version: 5,
         createdAt: new Date().toISOString(),
         laser: laser ?? null,
         materials: usedMaterials,
@@ -952,10 +1390,14 @@ export async function createExportPackage(
                 ),
             )
           : [],
-        files: usedMaterials.map(
-          (material) =>
-            `${safeName(material.name)}_${material.thickness}mm.svg`,
-        ),
+        files: usedMaterials.flatMap((material) => {
+          const baseName = `${safeName(material.name)}_${material.thickness}mm`
+          return [
+            `${baseName}.svg`,
+            `${baseName}.dxf`,
+            ...(processingProfiles && laser ? [`${baseName}.lbrn2`] : []),
+          ]
+        }),
       },
       null,
       2,
@@ -963,7 +1405,7 @@ export async function createExportPackage(
   )
   zip.file(
     'README.txt',
-    'LaserCut Studio Export\n\nBearbeitungsreihenfolge: Gravur, Markierung, Innenschnitt, Außenschnitt.\nSVG-Farben bilden LightBurn-Layer. Laserparameter stehen zusätzlich im Manifest und in den SVG-Layer-Metadaten. Vor dem Start Einstellungen und Vorschau in LightBurn prüfen.\n',
+    'LaserCut Studio Export\n\nBearbeitungsreihenfolge: Gravur, Markierung, Innenschnitt, Außenschnitt.\nLBRN2 enthält Geometrie, Bearbeitungsreihenfolge und Laserparameter als direkt öffnbares LightBurn-Projekt. SVG- und DXF-Farben bilden LightBurn-Layer. Die DXF-Dateien verwenden Millimeter und geschlossene Polylinien; flächige Bearbeitungen werden als geschlossene Konturen übertragen. Laserparameter stehen außerdem im Manifest und in den SVG-Layer-Metadaten. Vor dem Start Einstellungen und Vorschau in LightBurn prüfen.\n',
   )
   return zip.generateAsync({ type: 'blob' })
 }

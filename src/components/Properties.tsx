@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   ArrowDownUp,
   Check,
@@ -41,6 +41,62 @@ const booleanLabels: Record<BooleanOperation, string> = {
   intersect: 'Schnittmenge',
   xor: 'XOR · Überlappung entfernen',
   'reverse-subtract': 'Umgekehrte Differenz',
+}
+
+const sidebarAccordionKey = 'lasercut-studio.sidebar-accordions.v1'
+
+function savedAccordionState(id: string, fallback: boolean) {
+  if (typeof localStorage === 'undefined') return fallback
+  try {
+    const saved = JSON.parse(localStorage.getItem(sidebarAccordionKey) || '{}')
+    return typeof saved[id] === 'boolean' ? saved[id] : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function SidebarAccordion({
+  id,
+  title,
+  className = '',
+  defaultOpen = true,
+  children,
+}: {
+  id: string
+  title: ReactNode
+  className?: string
+  defaultOpen?: boolean
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(() => savedAccordionState(id, defaultOpen))
+  const update = (next: boolean) => {
+    setOpen(next)
+    if (typeof localStorage === 'undefined') return
+    try {
+      const saved = JSON.parse(
+        localStorage.getItem(sidebarAccordionKey) || '{}',
+      )
+      localStorage.setItem(
+        sidebarAccordionKey,
+        JSON.stringify({ ...saved, [id]: next }),
+      )
+    } catch {
+      // The sidebar remains usable when browser storage is unavailable.
+    }
+  }
+  return (
+    <details
+      className={`sidebar-accordion ${className}`.trim()}
+      open={open}
+      onToggle={(event) => update(event.currentTarget.open)}
+    >
+      <summary>
+        <span>{title}</span>
+        <ChevronDown />
+      </summary>
+      <div className="sidebar-accordion-content">{children}</div>
+    </details>
+  )
 }
 
 function DimensionInput({
@@ -242,9 +298,6 @@ export function Properties() {
   const geometrySelectionMode = useEditor(
     (state) => state.geometrySelectionMode,
   )
-  const setGeometrySelectionMode = useEditor(
-    (state) => state.setGeometrySelectionMode,
-  )
   const contourSelection = useEditor((state) => state.contourSelection)
   const moveSelectedContour = useEditor((state) => state.moveSelectedContour)
   const selectPanel = useEditor((state) => state.selectPanel)
@@ -279,6 +332,22 @@ export function Properties() {
     selected.length === 1
       ? panels.find((panel) => panel.id === selected[0])
       : undefined
+  const selectedTextShape: Extract<PanelShape, { type: 'text' }> | undefined =
+    selectedPanel?.shape?.type === 'text'
+      ? selectedPanel.shape
+      : selectedPanel?.shape?.type === 'free' &&
+          selectedPanel.shape.sourceType === 'text'
+        ? {
+            type: 'text',
+            text: 'Text',
+            fontFamily: bundledFontFamily,
+            fontSize: Math.max(1, selectedPanel.size[1]),
+            display: 'filled',
+            operation: 'engrave-fill',
+            outline: null,
+            editedFaces: selectedPanel.shape.faces,
+          }
+        : undefined
   const selectedVertical = panels.find(
     (panel) => selected.includes(panel.id) && thinAxis(panel) !== 1,
   )
@@ -331,6 +400,14 @@ export function Properties() {
     selectedPanel && rotationPreview?.panelId === selectedPanel.id
       ? rotationPreview.rotation
       : selectedPanel?.rotation
+  const displayedPosition =
+    selectedPanel && rotationPreview?.panelId === selectedPanel.id
+      ? (rotationPreview.position ?? selectedPanel.position)
+      : selectedPanel?.position
+  const displayedSize =
+    selectedPanel && rotationPreview?.panelId === selectedPanel.id
+      ? (rotationPreview.size ?? selectedPanel.size)
+      : selectedPanel?.size
   const selectedJointCount = fingerJoints.filter((joint) =>
     selected.length === 1
       ? joint.firstPanelId === selected[0] ||
@@ -371,35 +448,39 @@ export function Properties() {
   const updateTextObject = async (
     changes: Partial<Extract<PanelShape, { type: 'text' }>>,
   ) => {
-    if (!selectedPanel || selectedPanel.shape?.type !== 'text') return
-    const next = { ...selectedPanel.shape, ...changes }
+    if (!selectedPanel || !selectedTextShape) return
+    const next = { ...selectedTextShape, ...changes }
     const geometryChanged =
       changes.text !== undefined ||
       changes.fontFamily !== undefined ||
       changes.fontSize !== undefined
+    if (geometryChanged) next.editedFaces = undefined
     if (!geometryChanged) {
       updatePanelShape(selectedPanel.id, next)
       return
     }
-    const outline = await createSystemTextOutline(
-      next.fontFamily,
-      next.text,
-      next.fontSize,
-    )
+    const outline =
+      next.fontFamily === bundledFontFamily
+        ? await createBundledTextOutline(next.text, next.fontSize)
+        : await createSystemTextOutline(
+            next.fontFamily,
+            next.text,
+            next.fontSize,
+          )
     if (!outline) {
       if (
         changes.fontSize !== undefined &&
-        selectedPanel.shape.outline &&
-        selectedPanel.shape.fontSize > 0
+        selectedTextShape.outline &&
+        selectedTextShape.fontSize > 0
       ) {
-        const factor = next.fontSize / selectedPanel.shape.fontSize
+        const factor = next.fontSize / selectedTextShape.fontSize
         const scaledOutline = {
-          ...selectedPanel.shape.outline,
-          width: selectedPanel.shape.outline.width * factor,
-          height: selectedPanel.shape.outline.height * factor,
-          centerX: selectedPanel.shape.outline.centerX * factor,
-          centerY: selectedPanel.shape.outline.centerY * factor,
-          commands: selectedPanel.shape.outline.commands.map((command) =>
+          ...selectedTextShape.outline,
+          width: selectedTextShape.outline.width * factor,
+          height: selectedTextShape.outline.height * factor,
+          centerX: selectedTextShape.outline.centerX * factor,
+          centerY: selectedTextShape.outline.centerY * factor,
+          commands: selectedTextShape.outline.commands.map((command) =>
             command.type === 'Z'
               ? command
               : (Object.fromEntries(
@@ -598,15 +679,21 @@ export function Properties() {
         </div>
       </div>
       {selectedPanel && (
-        <section className="object-geometry-editor">
-          <h3>Geometrie</h3>
+        <SidebarAccordion
+          key="geometry"
+          id="geometry"
+          title="Geometrie"
+          className="object-geometry-editor"
+        >
           <h4 className="shape-parameter-title">Position</h4>
           {(['X', 'Y', 'Z'] as const).map((axis, index) => (
             <label className="number-field" key={`position-${axis}`}>
               <span>{axis}</span>
               <div>
                 <PositionInput
-                  value={selectedPanel.position[index]}
+                  value={
+                    displayedPosition?.[index] ?? selectedPanel.position[index]
+                  }
                   onCommit={(value) => {
                     const position: [number, number, number] = [
                       ...selectedPanel.position,
@@ -656,7 +743,9 @@ export function Properties() {
                   <span>{visibleIndex === 0 ? 'Breite' : 'Höhe'}</span>
                   <div>
                     <DimensionInput
-                      value={selectedPanel.size[index]}
+                      value={
+                        displayedSize?.[index] ?? selectedPanel.size[index]
+                      }
                       onCommit={(value) => {
                         const size: [number, number, number] = [
                           ...selectedPanel.size,
@@ -681,7 +770,11 @@ export function Properties() {
                     ? 'Kreis'
                     : selectedPanel.shape.type === 'text'
                       ? 'Text'
-                      : 'Dreieck'}
+                      : selectedPanel.shape.type === 'free'
+                        ? selectedPanel.shape.sourceType === 'text'
+                          ? 'Text'
+                          : 'Freie Kontur'
+                        : 'Dreieck'}
             </h4>
           )}
           {selectedPanel.shape?.type === 'polygon' && (
@@ -782,72 +875,75 @@ export function Properties() {
               </label>
             </>
           )}
-          {selectedPanel.shape?.type === 'text' && (
-            <div className="text-shape-parameters">
-              <label className="text-field">
-                <span>Text</span>
-                <input
-                  value={selectedPanel.shape.text}
-                  onChange={(event) =>
-                    void updateTextObject({ text: event.target.value })
-                  }
-                />
-              </label>
-              <label className="text-field">
-                <span>Systemschrift</span>
-                <SystemFontPicker
-                  fonts={systemFonts}
-                  value={selectedPanel.shape.fontFamily || 'Schrift auswählen…'}
-                  onChange={(fontFamily) =>
-                    void updateTextObject({ fontFamily })
-                  }
-                  onLoad={async () =>
-                    setSystemFonts(await listInstalledSystemFonts())
-                  }
-                />
-              </label>
-              <small className="font-count">
-                {systemFonts.length
-                  ? `${systemFonts.length} Schriften verfügbar`
-                  : 'Schriften laden'}
-              </small>
-              <label className="number-field">
-                <span>Schriftgröße</span>
-                <div>
-                  <input
-                    type="number"
-                    min="1"
-                    value={selectedPanel.shape.fontSize}
-                    onChange={(event) =>
-                      void updateTextObject({
-                        fontSize: Math.max(1, Number(event.target.value)),
-                      })
-                    }
-                  />
-                  <em>mm</em>
-                </div>
-              </label>
-              <label className="select-field">
-                <span>Darstellung</span>
-                <select
-                  value={selectedPanel.shape.display ?? 'filled'}
-                  onChange={(event) =>
-                    void updateTextObject({
-                      display: event.target.value as 'filled' | 'outline',
-                    })
-                  }
-                >
-                  <option value="filled">Gefüllt</option>
-                  <option value="outline">Umriss</option>
-                </select>
-              </label>
+        </SidebarAccordion>
+      )}
+      {selectedPanel && selectedTextShape && (
+        <SidebarAccordion
+          key="text"
+          id="text"
+          title="Text"
+          className="text-shape-parameters"
+        >
+          <label className="property-text-field">
+            <span>Inhalt</span>
+            <input
+              value={selectedTextShape.text}
+              onChange={(event) =>
+                void updateTextObject({ text: event.target.value })
+              }
+            />
+          </label>
+          <label className="property-text-field">
+            <span>Schriftart</span>
+            <SystemFontPicker
+              fonts={systemFonts}
+              value={selectedTextShape.fontFamily || 'Schrift auswählen…'}
+              onChange={(fontFamily) => void updateTextObject({ fontFamily })}
+              onLoad={async () =>
+                setSystemFonts(await listInstalledSystemFonts())
+              }
+            />
+          </label>
+          <label className="number-field">
+            <span>Schriftgröße</span>
+            <div>
+              <input
+                type="number"
+                min="1"
+                value={selectedTextShape.fontSize}
+                onChange={(event) =>
+                  void updateTextObject({
+                    fontSize: Math.max(1, Number(event.target.value)),
+                  })
+                }
+              />
+              <em>mm</em>
             </div>
-          )}
-        </section>
+          </label>
+          <label className="select-field">
+            <span>Darstellung</span>
+            <select
+              value={selectedTextShape.display ?? 'filled'}
+              onChange={(event) =>
+                void updateTextObject({
+                  display: event.target.value as 'filled' | 'outline',
+                })
+              }
+            >
+              <option value="filled">Gefüllt</option>
+              <option value="outline">Umriss</option>
+            </select>
+          </label>
+        </SidebarAccordion>
       )}
       {selected.length > 0 && (
-        <section className="object-color-editor">
-          <h3>{selectedGroupId ? 'Baugruppenfarbe' : 'Objektfarbe'}</h3>
+        <SidebarAccordion
+          key="object-color"
+          id="object-color"
+          title={selectedGroupId ? 'Baugruppenfarbe' : 'Objektfarbe'}
+          className="object-color-editor"
+          defaultOpen={false}
+        >
           <label className="material-color">
             <span>Darstellung im 3D-Editor</span>
             <input
@@ -882,11 +978,15 @@ export function Properties() {
           >
             Materialfarbe verwenden
           </button>
-        </section>
+        </SidebarAccordion>
       )}
       {booleanTarget && booleanTool && (
-        <section className="boolean-builder">
-          <h3>Formen kombinieren</h3>
+        <SidebarAccordion
+          key="boolean"
+          id="boolean"
+          title="Formen kombinieren"
+          className="boolean-builder"
+        >
           <div className="boolean-operands">
             <div>
               <small>Zielkörper</small>
@@ -924,10 +1024,15 @@ export function Properties() {
           >
             Anwenden
           </button>
-        </section>
+        </SidebarAccordion>
       )}
       {booleanTarget && booleanTool && connectionAnalysis && (
-        <section className="finger-joint-builder connection-builder">
+        <SidebarAccordion
+          key="connection-builder"
+          id="connection-builder"
+          title="Verbindung erstellen"
+          className="finger-joint-builder connection-builder"
+        >
           <button
             className={`connection-builder-toggle${connectionBuilderOpen ? ' active' : ''}`}
             onClick={() => setConnectionBuilderOpen((open) => !open)}
@@ -1166,11 +1271,15 @@ export function Properties() {
               )}
             </>
           )}
-        </section>
+        </SidebarAccordion>
       )}
       {selected.length > 1 && (
-        <section className="selection-transform">
-          <h3>Nur ausgewählte Teile</h3>
+        <SidebarAccordion
+          key="selection-transform"
+          id="selection-transform"
+          title="Nur ausgewählte Teile"
+          className="selection-transform"
+        >
           {selectedCenter && (
             <>
               <h4 className="shape-parameter-title">Gemeinsame Position</h4>
@@ -1217,85 +1326,71 @@ export function Properties() {
               </label>
             </>
           ) : null}
-        </section>
+        </SidebarAccordion>
       )}
-      {selectedPanel && (
-        <section className="contour-editor">
-          <h3>Auswahlquelle</h3>
-          <div
-            className="geometry-mode-switch"
-            role="group"
-            aria-label="Geometrieauswahl"
-          >
-            {(
-              [
-                ['object', 'Objekt'],
-                ['face', 'Fläche'],
-                ['edge', 'Kante'],
-              ] as const
-            ).map(([mode, label]) => (
+      {selectedPanel && geometrySelectionMode !== 'object' && (
+        <SidebarAccordion
+          id="contour-edit"
+          key="contour-edit"
+          className="contour-editor"
+          title={
+            geometrySelectionMode === 'face'
+              ? 'Flächenbearbeitung'
+              : 'Kantenbearbeitung'
+          }
+        >
+          <small className="property-help">
+            {geometrySelectionMode === 'face'
+              ? 'Klicke auf eine Seitenfläche, um die zugehörige Konturseite zu verschieben.'
+              : 'Klicke auf einen Eckpunkt, um diese Kante einzeln zu verschieben.'}
+          </small>
+          {contourSelection?.panelId === selectedPanel.id && (
+            <div className="contour-move">
+              <label className="number-field">
+                <span>Verschiebung X</span>
+                <div>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={contourX}
+                    onChange={(event) =>
+                      setContourX(Number(event.target.value))
+                    }
+                  />
+                  <em>mm</em>
+                </div>
+              </label>
+              <label className="number-field">
+                <span>Verschiebung Y</span>
+                <div>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={contourY}
+                    onChange={(event) =>
+                      setContourY(Number(event.target.value))
+                    }
+                  />
+                  <em>mm</em>
+                </div>
+              </label>
               <button
                 type="button"
-                className={geometrySelectionMode === mode ? 'active' : ''}
-                key={mode}
-                onClick={() => setGeometrySelectionMode(mode)}
+                onClick={() => moveSelectedContour([contourX, contourY])}
               >
-                {label}
+                Auswahl verschieben
               </button>
-            ))}
-          </div>
-          {geometrySelectionMode !== 'object' && (
-            <>
-              <small className="property-help">
-                {geometrySelectionMode === 'face'
-                  ? 'Klicke auf eine Seitenfläche, um die zugehörige Konturseite zu verschieben.'
-                  : 'Klicke auf einen Eckpunkt, um diese Kante einzeln zu verschieben.'}
-              </small>
-              {contourSelection?.panelId === selectedPanel.id && (
-                <div className="contour-move">
-                  <label className="number-field">
-                    <span>Verschiebung X</span>
-                    <div>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={contourX}
-                        onChange={(event) =>
-                          setContourX(Number(event.target.value))
-                        }
-                      />
-                      <em>mm</em>
-                    </div>
-                  </label>
-                  <label className="number-field">
-                    <span>Verschiebung Y</span>
-                    <div>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={contourY}
-                        onChange={(event) =>
-                          setContourY(Number(event.target.value))
-                        }
-                      />
-                      <em>mm</em>
-                    </div>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => moveSelectedContour([contourX, contourY])}
-                  >
-                    Auswahl verschieben
-                  </button>
-                </div>
-              )}
-            </>
+            </div>
           )}
-        </section>
+        </SidebarAccordion>
       )}
       {selectedPanel && selectedPanel.cuts.length > 0 && (
-        <section className="cut-list">
-          <h3>Aussparungen · {selectedPanel.cuts.length}</h3>
+        <SidebarAccordion
+          key="cuts"
+          id="cuts"
+          title={`Aussparungen · ${selectedPanel.cuts.length}`}
+          className="cut-list"
+        >
           {selectedPanel.cuts.map((cut, cutIndex) => (
             <details key={cut.id} open={selectedPanel.cuts.length === 1}>
               <summary>
@@ -1363,11 +1458,15 @@ export function Properties() {
               ))}
             </details>
           ))}
-        </section>
+        </SidebarAccordion>
       )}
       {selectedPanel && selectedPanel.booleanModifiers.length > 0 && (
-        <section className="modifier-stack">
-          <h3>Formkombinationen · {selectedPanel.booleanModifiers.length}</h3>
+        <SidebarAccordion
+          key="modifier-stack"
+          id="modifier-stack"
+          title={`Formkombinationen · ${selectedPanel.booleanModifiers.length}`}
+          className="modifier-stack"
+        >
           {selectedPanel.booleanModifiers.map((modifier, index) => {
             const tool = panels.find((panel) => panel.id === modifier.toolId)
             return (
@@ -1408,7 +1507,7 @@ export function Properties() {
               </div>
             )
           })}
-        </section>
+        </SidebarAccordion>
       )}
       {selectedPanel &&
         (fingerJoints.some(
@@ -1421,8 +1520,12 @@ export function Properties() {
               joint.firstPanelId === selectedPanel.id ||
               joint.secondPanelId === selectedPanel.id,
           )) && (
-          <section className="joint-stack">
-            <h3>Verbindungen</h3>
+          <SidebarAccordion
+            key="joints"
+            id="joints"
+            title="Verbindungen"
+            className="joint-stack"
+          >
             {fingerJoints
               .filter(
                 (joint) =>
@@ -1493,11 +1596,14 @@ export function Properties() {
                 Alle Finger dieses Teils entfernen
               </button>
             )}
-          </section>
+          </SidebarAccordion>
         )}
       {!selected.length && (
-        <section>
-          <h3>Gesamte Box · Abmessungen</h3>
+        <SidebarAccordion
+          key="box-dimensions"
+          id="box-dimensions"
+          title="Gesamte Box · Abmessungen"
+        >
           {fields.slice(0, 3).map((field) => (
             <label className="number-field" key={field.key}>
               <span>{field.label}</span>
@@ -1518,11 +1624,14 @@ export function Properties() {
               </div>
             </label>
           ))}
-        </section>
+        </SidebarAccordion>
       )}
       {!selected.length && (
-        <section>
-          <h3>Gesamte Box · Konstruktion</h3>
+        <SidebarAccordion
+          key="box-construction"
+          id="box-construction"
+          title="Gesamte Box · Konstruktion"
+        >
           {fields.slice(3).map((field) => (
             <label className="number-field" key={field.key}>
               <span>{field.label}</span>
@@ -1550,10 +1659,14 @@ export function Properties() {
               <option value="butt">Stoßkante</option>
             </select>
           </label>
-        </section>
+        </SidebarAccordion>
       )}
-      <section className="material-editor">
-        <h3>Material</h3>
+      <SidebarAccordion
+        key="material"
+        id="material"
+        title="Material"
+        className="material-editor"
+      >
         <>
           <label className="select-field">
             <span>
@@ -1670,10 +1783,15 @@ export function Properties() {
             </button>
           </div>
         </details>
-      </section>
+      </SidebarAccordion>
       {selectedPanel && (
-        <section className="processing-editor">
-          <h3>Laserbearbeitung</h3>
+        <SidebarAccordion
+          key="processing"
+          id="processing"
+          title="Laserbearbeitung"
+          className="processing-editor"
+          defaultOpen={false}
+        >
           <label className="processing-auto-cut">
             <input
               type="checkbox"
@@ -1765,7 +1883,7 @@ export function Properties() {
             Profile beschreiben die gewünschte Bearbeitung. Dasselbe Objekt kann
             mehrere Profile erhalten.
           </small>
-        </section>
+        </SidebarAccordion>
       )}
       {selected.length > 0 && (
         <div className="selection-actions">

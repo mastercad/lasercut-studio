@@ -90,8 +90,28 @@ export function shapeToFreeContour(
         holes: face.holes.map((hole) => hole.map((point) => [...point])),
       })),
     }
+  if (shape.editedFaces?.length)
+    return {
+      type: 'free',
+      sourceType: shape.type,
+      faces: shape.editedFaces.map((face) => ({
+        ...face,
+        outer: face.outer.map((point) => [...point]),
+        holes: face.holes.map((hole) =>
+          hole.map((point) => [...point] as ContourPoint),
+        ),
+      })),
+    }
   let faces: ContourFace[]
-  if (shape.type === 'text' && shape.outline) {
+  if (shape.type === 'text' && shape.editedFaces?.length) {
+    faces = shape.editedFaces.map((face) => ({
+      ...face,
+      outer: face.outer.map((point) => [...point]),
+      holes: face.holes.map((hole) =>
+        hole.map((point) => [...point] as ContourPoint),
+      ),
+    }))
+  } else if (shape.type === 'text' && shape.outline) {
     faces = textOutlineShapes(shape.outline).map((item, index) => ({
       id: `face-${index}`,
       outer: sampled(item),

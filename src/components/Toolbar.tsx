@@ -58,6 +58,12 @@ export function Toolbar() {
   const duplicateSelected = useEditor((state) => state.duplicateSelected)
   const transformMode = useEditor((state) => state.transformMode)
   const setTransformMode = useEditor((state) => state.setTransformMode)
+  const geometrySelectionMode = useEditor(
+    (state) => state.geometrySelectionMode,
+  )
+  const setGeometrySelectionMode = useEditor(
+    (state) => state.setGeometrySelectionMode,
+  )
   const addShape = useEditor((state) => state.addShape)
   const snapEnabled = useEditor((state) => state.snapEnabled)
   const toggleSnap = useEditor((state) => state.toggleSnap)
@@ -177,18 +183,21 @@ export function Toolbar() {
             ref={fileInput}
             className="project-file-input"
             type="file"
-            accept=".json,.lcs.json,.svg,application/json,image/svg+xml"
+            accept=".json,.lcs.json,.svg,.dxf,.lbrn,.lbrn2,application/json,image/svg+xml,application/dxf,application/xml,text/xml"
             onChange={async (event) => {
               const file = event.target.files?.[0]
               if (
                 file?.name.toLowerCase().endsWith('.svg') ||
+                file?.name.toLowerCase().endsWith('.dxf') ||
+                file?.name.toLowerCase().endsWith('.lbrn') ||
+                file?.name.toLowerCase().endsWith('.lbrn2') ||
                 file?.type === 'image/svg+xml'
               ) {
                 setSvgImportFile(file)
                 setSvgImportOpen(true)
               } else if (file && !loadProject(await file.text()))
                 window.alert(
-                  'Diese Projektdatei konnte nicht geöffnet werden. Bitte eine .lcs.json- oder SVG-Datei auswählen.',
+                  'Diese Projektdatei konnte nicht geöffnet werden. Bitte eine .lcs.json-, SVG-, DXF-, LBRN- oder LBRN2-Datei auswählen.',
                 )
               event.target.value = ''
             }}
@@ -214,9 +223,37 @@ export function Toolbar() {
           className="svg-import-button"
           onClick={() => setSvgImportOpen(true)}
         >
-          <FileUp /> SVG importieren
+          <FileUp /> SVG/DXF/LightBurn importieren
         </button>
         <div className="toolbar-group tools">
+          <div
+            className="toolbar-geometry-mode"
+            role="group"
+            aria-label="Geometrieauswahl"
+          >
+            {(
+              [
+                ['object', 'Objekt'],
+                ['face', 'Fläche'],
+                ['edge', 'Kante'],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                type="button"
+                className={geometrySelectionMode === mode ? 'active' : ''}
+                disabled={workspace !== 'model' || selected.length !== 1}
+                title={
+                  selected.length === 1
+                    ? `${label} auswählen und bearbeiten`
+                    : 'Für die Geometriebearbeitung genau ein Objekt auswählen'
+                }
+                key={mode}
+                onClick={() => setGeometrySelectionMode(mode)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <ToolButton
             title="Verschieben (G)"
             active={transformMode === 'translate'}

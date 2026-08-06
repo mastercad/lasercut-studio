@@ -403,6 +403,8 @@ export type EditorState = {
   rotationPreview: {
     panelId: string
     rotation: [number, number, number]
+    position?: [number, number, number]
+    size?: [number, number, number]
   } | null
   jointPreview:
     | {
@@ -443,6 +445,13 @@ export type EditorState = {
       groupName: string
       materialId: string
       faces: ContourFace[]
+      attachedOperations?: {
+        id: string
+        name: string
+        operation: string
+        shapeType?: string
+        faces: ContourFace[]
+      }[]
     }[],
   ) => void
   updatePanelShape: (id: string, shape: PanelShape) => void
@@ -538,9 +547,7 @@ export type EditorState = {
   redo: () => void
   beginTransform: () => void
   endTransform: () => void
-  setRotationPreview: (
-    preview: { panelId: string; rotation: [number, number, number] } | null,
-  ) => void
+  setRotationPreview: (preview: EditorState['rotationPreview']) => void
   setJointPreview: (preview: EditorState['jointPreview']) => void
   setWorkspace: (workspace: Workspace) => void
   newProject: (template: 'empty' | 'box') => void
@@ -1754,6 +1761,22 @@ export const useEditor = create<EditorState>((set) => ({
           materialId: material?.id,
           autoCut: true,
           processingAssignments: [],
+          importedOperations: object.attachedOperations?.map((operation) => ({
+            ...operation,
+            faces: operation.faces.map((face) => ({
+              ...face,
+              outer: face.outer.map(
+                ([x, y]) =>
+                  [x - objectCenterX, y - objectCenterY] as [number, number],
+              ),
+              holes: face.holes.map((hole) =>
+                hole.map(
+                  ([x, y]) =>
+                    [x - objectCenterX, y - objectCenterY] as [number, number],
+                ),
+              ),
+            })),
+          })),
           shape: { type: 'free', sourceType: 'svg', faces },
         }
       })
@@ -1826,11 +1849,6 @@ export const useEditor = create<EditorState>((set) => ({
     }),
   selectContourFace: (panelId, faceIndex, ringIndex, edgeIndex) =>
     set((state) => ({
-      panels: state.panels.map((panel) =>
-        panel.id === panelId && panel.shape?.type !== 'free'
-          ? { ...panel, shape: shapeToFreeContour(panel) }
-          : panel,
-      ),
       contourSelection: {
         panelId,
         faceIndex,
@@ -1841,11 +1859,6 @@ export const useEditor = create<EditorState>((set) => ({
     })),
   selectContourEdge: (panelId, faceIndex, ringIndex, edgeIndex) =>
     set((state) => ({
-      panels: state.panels.map((panel) =>
-        panel.id === panelId && panel.shape?.type !== 'free'
-          ? { ...panel, shape: shapeToFreeContour(panel) }
-          : panel,
-      ),
       contourSelection: {
         panelId,
         faceIndex,
@@ -1860,9 +1873,10 @@ export const useEditor = create<EditorState>((set) => ({
       if (!selection) return state
       return {
         panels: state.panels.map((panel) => {
-          if (panel.id !== selection.panelId || panel.shape?.type !== 'free')
-            return panel
-          const faces = panel.shape.faces.map((face, faceIndex) => {
+          if (panel.id !== selection.panelId) return panel
+          const originalShape = panel.shape ?? { type: 'rectangle' as const }
+          const workingShape = shapeToFreeContour(panel)
+          const faces = workingShape.faces.map((face, faceIndex) => {
             if (faceIndex !== selection.faceIndex) return face
             const moved = (point: [number, number]): [number, number] => [
               point[0] + delta[0],
@@ -1881,7 +1895,13 @@ export const useEditor = create<EditorState>((set) => ({
             }
             return { ...face, outer: rings[0], holes: rings.slice(1) }
           })
-          return { ...panel, shape: { ...panel.shape, faces } }
+          return {
+            ...panel,
+            shape:
+              originalShape.type === 'free'
+                ? { ...originalShape, faces }
+                : { ...originalShape, editedFaces: faces },
+          }
         }),
         operationMessage:
           'Kontur geändert; Ober- und Unterkante bleiben parallel.',

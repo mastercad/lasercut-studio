@@ -27,11 +27,16 @@ export type BooleanModifier = {
 export type FingerStyle = 'straight' | 'dogbone' | 't-bone'
 export type FitPreset = 'press' | 'tight' | 'loose' | 'custom'
 export type PanelShape =
-  | { type: 'rectangle' }
-  | { type: 'triangle' }
-  | { type: 'circle'; segments: number }
-  | { type: 'star'; points: number; innerRatio: number }
-  | { type: 'polygon'; sides: number }
+  | { type: 'rectangle'; editedFaces?: ContourFace[] }
+  | { type: 'triangle'; editedFaces?: ContourFace[] }
+  | { type: 'circle'; segments: number; editedFaces?: ContourFace[] }
+  | {
+      type: 'star'
+      points: number
+      innerRatio: number
+      editedFaces?: ContourFace[]
+    }
+  | { type: 'polygon'; sides: number; editedFaces?: ContourFace[] }
   | {
       type: 'text'
       text: string
@@ -40,6 +45,8 @@ export type PanelShape =
       display?: 'filled' | 'outline'
       operation: 'cut' | 'engrave-fill' | 'engrave-line'
       outline: TextOutline | null
+      /** Manually edited Face/Edge geometry while retaining text parameters. */
+      editedFaces?: ContourFace[]
     }
   | { type: 'free'; sourceType: string; faces: ContourFace[] }
 export type ContourPoint = [number, number]
@@ -137,6 +144,14 @@ export type PanelDefinition = {
     id: string
     profileId: string
     geometry: 'fill' | 'contour'
+  }[]
+  /** Operations retained from an imported source file, such as engraving or text. */
+  importedOperations?: {
+    id: string
+    name: string
+    operation: string
+    shapeType?: string
+    faces: ContourFace[]
   }[]
 }
 

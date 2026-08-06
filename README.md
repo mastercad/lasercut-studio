@@ -41,5 +41,5 @@ together as a downloadable GitHub Release tagged with the workflow build number.
 1. Finger-joint geometry and kerf compensation
 2. Editable plate primitives and snapping
 3. 2D unfolding and sheet layout
-4. SVG/DXF export
+4. SVG/DXF export ✓
 5. Electron desktop packaging

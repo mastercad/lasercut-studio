@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  clearEvaluatedGeometryCache,
+  createCachedEvaluatedPanelGeometry,
   createEditorPanelGeometry,
   createEvaluatedPanelGeometry,
   createPanelGeometry,
@@ -8,6 +10,29 @@ import {
 import type { BooleanOperation, PanelDefinition } from './box'
 
 describe('CSG panel geometry', () => {
+  it('reuses evaluated geometry until the explicit cache reset', () => {
+    const panel: PanelDefinition = {
+      id: 'cached',
+      label: 'Cached',
+      size: [20, 10, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+    }
+    const first = createCachedEvaluatedPanelGeometry(panel, [panel])
+    const cachedClone = createCachedEvaluatedPanelGeometry(panel, [panel])
+    expect(cachedClone).not.toBe(first)
+    expect(cachedClone.getAttribute('position').count).toBe(
+      first.getAttribute('position').count,
+    )
+    clearEvaluatedGeometryCache()
+    const rebuilt = createCachedEvaluatedPanelGeometry(panel, [panel])
+    expect(rebuilt).not.toBe(first)
+    clearEvaluatedGeometryCache()
+  })
   it('builds many rectangular connection slots through the fast editor path', () => {
     const slotted: PanelDefinition = {
       id: 'fast-slotted',
@@ -232,6 +257,49 @@ describe('CSG panel geometry', () => {
     geometry.computeBoundingBox()
     expect(geometry.boundingBox?.max.x).toBeCloseTo(40)
     geometry.dispose()
+  })
+
+  it('retains imported engraving and cut-text operations in the panel geometry', () => {
+    const operationFace = {
+      id: 'operation-face',
+      outer: [
+        [-10, -5],
+        [10, -5],
+        [10, 5],
+        [-10, 5],
+      ] as [number, number][],
+      holes: [],
+    }
+    const panel: PanelDefinition = {
+      id: 'imported-operation',
+      label: 'Imported operation',
+      size: [80, 60, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      importedOperations: [
+        {
+          id: 'engraving',
+          name: 'Label',
+          operation: 'Scan',
+          shapeType: 'Text',
+          faces: [operationFace],
+        },
+      ],
+    }
+    const engraved = createPanelGeometry(panel)
+    const plain = createPanelGeometry({ ...panel, importedOperations: [] })
+    expect(engraved.getAttribute('position').count).toBeGreaterThan(
+      plain.getAttribute('position').count,
+    )
+    expect(panelGeometryKey(panel, [panel])).not.toBe(
+      panelGeometryKey({ ...panel, importedOperations: [] }, [panel]),
+    )
+    engraved.dispose()
+    plain.dispose()
   })
 
   it.each<BooleanOperation>([

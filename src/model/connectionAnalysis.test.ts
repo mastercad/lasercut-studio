@@ -20,6 +20,24 @@ const plate = (
 })
 
 describe('connection analysis', () => {
+  it('rejects parallel plates, missing overlap and spatially separated plates with precise messages', () => {
+    expect(
+      analyzeConnection(plate('a', [0, 0, 0]), plate('b', [0, 0, 0])).message,
+    ).toMatch(/parallel/)
+    expect(
+      analyzeConnection(
+        plate('a', [0, 0, 0]),
+        plate('b', [0, Math.PI / 2, 0], [0, 200, 0]),
+      ).message,
+    ).toMatch(/keine gemeinsame/)
+    expect(
+      analyzeConnection(
+        plate('a', [0, 0, 0]),
+        plate('b', [0, Math.PI / 2, 0], [200, 0, 0]),
+      ).message,
+    ).toMatch(/schneiden oder berühren/)
+  })
+
   it('offers finger joints only for two meeting edges', () => {
     const panels = createBoxPanels({
       width: 180,
@@ -47,6 +65,7 @@ describe('connection analysis', () => {
       tabSlot: true,
       cross: true,
     })
+    expect(analyzeConnection(tPanel, receiver).message).toMatch(/Plattenkante/)
     expect(analyzeConnection(receiver, tPanel).possible).toEqual({
       finger: false,
       tabSlot: false,
@@ -55,6 +74,9 @@ describe('connection analysis', () => {
     expect(
       analyzeConnection(plate('cross-a', [0, 0, 0]), receiver).possible.cross,
     ).toBe(true)
+    expect(
+      analyzeConnection(plate('cross-a', [0, 0, 0]), receiver).message,
+    ).toMatch(/Plattenflächen/)
   })
 
   it('builds a Steckkreuz where one plate ends in a T connection', () => {

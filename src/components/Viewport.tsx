@@ -28,10 +28,10 @@ import {
   type Camera,
   type Group,
   type Mesh,
-  type Object3D,
   type Raycaster,
   type Scene,
 } from 'three'
+import { panelIdOf } from './viewportUtils'
 import {
   createCachedEvaluatedPanelGeometry,
   panelGeometryKey,
@@ -672,6 +672,7 @@ function EditablePanel({
   const mesh = (
     <mesh
       ref={meshRef}
+      name={`panel-${panel.id}`}
       userData={{ panelId: panel.id }}
       position={
         groupCenter
@@ -812,7 +813,7 @@ function EditablePanel({
           }}
           onObjectChange={() => {
             const object = meshRef.current
-            if (transformMode === 'rotate' && object)
+            if (object)
               setRotationPreview({
                 panelId: panel.id,
                 rotation: [
@@ -820,6 +821,17 @@ function EditablePanel({
                   object.rotation.y,
                   object.rotation.z,
                 ],
+                position: [
+                  object.position.x,
+                  object.position.y,
+                  object.position.z,
+                ],
+                size: panel.size.map((value, axis) =>
+                  Math.max(
+                    0.5,
+                    value * Math.abs(object.scale.getComponent(axis)),
+                  ),
+                ) as [number, number, number],
               })
             if (transformMode === 'translate' && object) {
               const linked = linkedBooleanToolIds(panel.id, allPanels)
@@ -1131,16 +1143,6 @@ function SelectionBridgeProvider({
       bridge.current = null
     }
   }, [bridge, camera, gl, raycaster, scene])
-  return null
-}
-
-const panelIdOf = (object: Object3D | null): string | null => {
-  let current = object
-  while (current) {
-    if (typeof current.userData.panelId === 'string')
-      return current.userData.panelId
-    current = current.parent
-  }
   return null
 }
 
@@ -1548,4 +1550,14 @@ export function Viewport() {
       </div>
     </div>
   )
+}
+
+export {
+  AlignmentGuides,
+  ContourEditorOverlay,
+  EditorReliefHole,
+  ExtrudedTextContour,
+  JointPreviewOverlay,
+  PreviewShape,
+  SideFaceTarget,
 }
