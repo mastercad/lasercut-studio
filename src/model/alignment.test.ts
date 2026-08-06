@@ -70,4 +70,13 @@ describe('smart alignment guides', () => {
       guides.filter((guide) => guide.axis === 1).map((guide) => guide.label),
     ).toEqual(['15,0 mm'])
   })
+
+  it('keeps a distance guide visible across a small projection-edge movement', () => {
+    const moving = panel('moving', [0, 0, 0])
+    const right = panel('right', [50, 41.5, 0])
+
+    expect(
+      calculateDistanceGuides(moving, moving.position, [right], new Set([0])),
+    ).toHaveLength(1)
+  })
 })

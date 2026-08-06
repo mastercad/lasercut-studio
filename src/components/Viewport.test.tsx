@@ -610,7 +610,7 @@ describe('Viewport 3D overlays', () => {
   })
 
   it('renders snapped, free and distance guide variants with their labels', () => {
-    render(
+    const view = render(
       <AlignmentGuides
         guides={[
           {
@@ -652,6 +652,25 @@ describe('Viewport 3D overlays', () => {
     expect(screen.getAllByTestId('three-line')).toHaveLength(3)
     expect(screen.getByText('X fluchtet')).toHaveClass('snapped')
     expect(screen.getByText('12 mm')).toHaveClass('distance')
+    const distanceLabel = screen.getByText('12 mm')
+    view.rerender(
+      <AlignmentGuides
+        guides={[
+          {
+            axis: 2,
+            kind: 'distance',
+            snapped: false,
+            label: '11,9 mm',
+            points: [
+              [0, 0, 0.1],
+              [0, 0, 1],
+            ],
+            position: [0, 0, 0.55],
+          },
+        ]}
+      />,
+    )
+    expect(screen.getByText('11,9 mm')).toBe(distanceLabel)
   })
 
   it('renders joint previews only for existing panels and all cut/feature kinds', () => {

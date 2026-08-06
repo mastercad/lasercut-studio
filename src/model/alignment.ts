@@ -110,6 +110,7 @@ export function calculateDistanceGuides(
 ): AlignmentGuide[] {
   const movingHalf = worldHalfExtents(moving)
   const guides: AlignmentGuide[] = []
+  const projectionTolerance = 2
   for (const axis of activeAxes) {
     const perpendicular = ([0, 1, 2] as const).filter(
       (candidate) => candidate !== axis,
@@ -135,7 +136,7 @@ export function calculateDistanceGuides(
             position[candidate] - movingHalf[candidate],
             other.position[candidate] - otherHalf[candidate],
           )
-        return overlap >= -0.05
+        return overlap >= -projectionTolerance
       })
       if (!overlapsProjection) continue
       const otherMin = other.position[axis] - otherHalf[axis]

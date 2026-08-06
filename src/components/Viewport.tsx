@@ -1154,7 +1154,13 @@ function AlignmentGuides({ guides }: { guides: AlignmentGuide[] }) {
     <group>
       {guides.map((guide) => (
         <group
-          key={`${guide.axis}-${guide.label}-${guide.points.flat().join(',')}`}
+          key={`${guide.kind ?? 'alignment'}-${guide.axis}-${
+            guide.kind === 'distance'
+              ? guide.points[1][guide.axis] < guide.points[0][guide.axis]
+                ? 'before'
+                : 'after'
+              : 'nearest'
+          }`}
         >
           <Line
             points={guide.points}
