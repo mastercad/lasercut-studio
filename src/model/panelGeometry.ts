@@ -228,8 +228,18 @@ export function createPanelGeometry(panel: PanelDefinition) {
   const additions = panel.jointFeatures
     .filter((feature) => feature.operation === 'add' && feature.shape === 'box')
     .map(featureGeometry)
+  // Derived joint cuts can temporarily coincide with a persistent/manual
+  // recess (for example while a cross-joint panel is snapped into a wider
+  // socket pattern). Apply the derived cut first and the persistent recess
+  // last. Besides making the persistent geometry authoritative, this avoids
+  // a contained, narrower CSG subtraction leaving its edges in place after a
+  // material-thickness change.
+  const orderedCuts = [...panel.cuts].sort(
+    (first, second) =>
+      Number(Boolean(second.jointId)) - Number(Boolean(first.jointId)),
+  )
   const boxSubtractions = [
-    ...panel.cuts.map((cut) => ({
+    ...orderedCuts.map((cut) => ({
       id: cut.id,
       jointId: cut.jointId ?? cut.id,
       operation: 'subtract' as const,
@@ -509,6 +519,13 @@ export function panelGeometryKey(
 
 const evaluatedGeometryCache = new Map<string, BufferGeometry>()
 const evaluatedGeometryCacheLimit = 96
+const evaluatedBoundsCache = new Map<
+  string,
+  {
+    min: [number, number, number]
+    max: [number, number, number]
+  }
+>()
 
 function cacheEvaluatedGeometry(key: string, geometry: BufferGeometry) {
   if (evaluatedGeometryCache.has(key)) return
@@ -544,9 +561,40 @@ export function createCachedEvaluatedPanelGeometry(
   return geometry
 }
 
+export function evaluatedPanelLocalBounds(
+  panel: PanelDefinition,
+  panels: PanelDefinition[],
+) {
+  const key = panelGeometryKey(panel, panels)
+  const cached = evaluatedBoundsCache.get(key)
+  if (cached) return cached
+  const geometry = createCachedEvaluatedPanelGeometry(panel, panels)
+  geometry.computeBoundingBox()
+  const box = geometry.boundingBox
+  const bounds = box
+    ? {
+        min: box.min.toArray() as [number, number, number],
+        max: box.max.toArray() as [number, number, number],
+      }
+    : {
+        min: panel.size.map((value) => -value / 2) as [number, number, number],
+        max: panel.size.map((value) => value / 2) as [number, number, number],
+      }
+  geometry.dispose()
+  evaluatedBoundsCache.set(key, bounds)
+  while (evaluatedBoundsCache.size > evaluatedGeometryCacheLimit) {
+    const oldest = evaluatedBoundsCache.keys().next().value as
+      string | undefined
+    if (!oldest) break
+    evaluatedBoundsCache.delete(oldest)
+  }
+  return bounds
+}
+
 export function clearEvaluatedGeometryCache() {
   evaluatedGeometryCache.forEach((geometry) => geometry.dispose())
   evaluatedGeometryCache.clear()
+  evaluatedBoundsCache.clear()
 }
 
 export function createEvaluatedPanelGeometry(

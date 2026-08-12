@@ -9,6 +9,7 @@ import {
   createExportPackage,
   createProfiledMaterialSvg,
   extractPanelContours,
+  splitPanelsIntoSheets,
   type ExportGroupInfo,
   type ExportLayerDefinition,
   type LaserCutterDefinition,
@@ -44,7 +45,11 @@ type PackageRequest = {
 }
 type WorkerRequest = AnalyzeRequest | PreviewRequest | PackageRequest
 type AnalysisResult = {
-  jobs: { material: MaterialDefinition; steps: ProjectExportStep[] }[]
+  jobs: {
+    material: MaterialDefinition
+    steps: ProjectExportStep[]
+    sheetCount: number
+  }[]
   cache: { hits: number; misses: number }
 }
 
@@ -120,31 +125,44 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
               panel.materialId === material.id,
           ),
         )
-        .map((material) => ({
-          material,
-          steps: buildProjectExportSteps(
-            material,
+        .map((material) => {
+          const materialPanels = payload.panels.filter(
+            (panel) => panel.materialId === material.id,
+          )
+          const sheets = splitPanelsIntoSheets(
+            materialPanels,
             payload.panels,
-            payload.profiles,
-            payload.recipes,
-            payload.laser.id,
-            {
-              inner: payload.presets.find(
-                (preset) =>
-                  preset.laserId === payload.laser.id &&
-                  preset.materialId === material.id &&
-                  preset.operation === 'cut-inner',
-              ),
-              outer: payload.presets.find(
-                (preset) =>
-                  preset.laserId === payload.laser.id &&
-                  preset.materialId === material.id &&
-                  preset.operation === 'cut-outer',
-              ),
-            },
+            payload.laser.bedWidth ?? 400,
+            payload.laser.bedHeight ?? 400,
             cachedContours,
-          ),
-        }))
+          )
+          return {
+            material,
+            sheetCount: sheets.length,
+            steps: buildProjectExportSteps(
+              material,
+              materialPanels,
+              payload.profiles,
+              payload.recipes,
+              payload.laser.id,
+              {
+                inner: payload.presets.find(
+                  (preset) =>
+                    preset.laserId === payload.laser.id &&
+                    preset.materialId === material.id &&
+                    preset.operation === 'cut-inner',
+                ),
+                outer: payload.presets.find(
+                  (preset) =>
+                    preset.laserId === payload.laser.id &&
+                    preset.materialId === material.id &&
+                    preset.operation === 'cut-outer',
+                ),
+              },
+              cachedContours,
+            ),
+          }
+        })
       const result: AnalysisResult = {
         jobs,
         cache: { hits: hits - beforeHits, misses: misses - beforeMisses },
@@ -158,30 +176,56 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       )
       if (!material)
         throw new Error('Das Material für die Vorschau wurde nicht gefunden.')
-      const svg = createProfiledMaterialSvg(
-        material,
-        payload.panels.filter((panel) => panel.materialId === material.id),
+      const materialPanels = payload.panels.filter(
+        (panel) => panel.materialId === material.id,
+      )
+      const bedWidth = payload.laser.bedWidth ?? 400
+      const bedHeight = payload.laser.bedHeight ?? 400
+      const sheets = splitPanelsIntoSheets(
+        materialPanels,
         payload.panels,
-        payload.profiles,
-        payload.recipes,
-        payload.laser.id,
-        {
-          inner: payload.presets.find(
-            (preset) =>
-              preset.laserId === payload.laser.id &&
-              preset.materialId === material.id &&
-              preset.operation === 'cut-inner',
-          ),
-          outer: payload.presets.find(
-            (preset) =>
-              preset.laserId === payload.laser.id &&
-              preset.materialId === material.id &&
-              preset.operation === 'cut-outer',
-          ),
-        },
-        payload.groups,
+        bedWidth,
+        bedHeight,
         cachedContours,
       )
+      const cutPreset = {
+        inner: payload.presets.find(
+          (preset) =>
+            preset.laserId === payload.laser.id &&
+            preset.materialId === material.id &&
+            preset.operation === 'cut-inner',
+        ),
+        outer: payload.presets.find(
+          (preset) =>
+            preset.laserId === payload.laser.id &&
+            preset.materialId === material.id &&
+            preset.operation === 'cut-outer',
+        ),
+      }
+      const pageGap = 20
+      const pages = sheets.map((sheetPanels, index) => {
+        const page = createProfiledMaterialSvg(
+          material,
+          sheetPanels,
+          payload.panels,
+          payload.profiles,
+          payload.recipes,
+          payload.laser.id,
+          cutPreset,
+          payload.groups,
+          cachedContours,
+          { width: bedWidth, height: bedHeight },
+        )
+        const content = page
+          .replace(/^<\?xml[^>]*>/, '')
+          .replace(/^<svg[^>]*>/, '')
+          .replace(/<\/svg>$/, '')
+        const y = index * (bedHeight + pageGap)
+        return `<g data-sheet="${index + 1}" transform="translate(0 ${y})"><rect x="0" y="0" width="${bedWidth}" height="${bedHeight}" fill="white" stroke="#59616c" stroke-width="1"/>${content}</g>`
+      })
+      const totalHeight =
+        sheets.length * bedHeight + (sheets.length - 1) * pageGap
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="${bedWidth}mm" height="${totalHeight}mm" viewBox="0 0 ${bedWidth} ${totalHeight}">${pages.join('')}</svg>`
       self.postMessage({ id, ok: true, result: svg })
       return
     }

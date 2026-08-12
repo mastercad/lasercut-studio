@@ -4,7 +4,9 @@ import { SceneTree } from './components/SceneTree'
 import { Toolbar } from './components/Toolbar'
 import { Viewport } from './components/Viewport'
 import { ExportWorkspace } from './components/ExportWorkspace'
+import { ExportPrewarmer } from './components/ExportPrewarmer'
 import { LaserManager } from './components/LaserManager'
+import { DesignIntegrityPanel } from './components/DesignIntegrityPanel'
 import { useEditor } from './store/editor'
 import {
   useRef,
@@ -100,6 +102,7 @@ export default function App() {
 
   return (
     <main className="app-shell">
+      <ExportPrewarmer />
       <Toolbar />
       <nav className="workspace-tabs">
         <button
@@ -134,7 +137,14 @@ export default function App() {
         >
           <i />
         </div>
-        {workspace === 'model' ? <Viewport /> : <ExportWorkspace />}
+        {workspace === 'model' ? (
+          <div className="model-workspace">
+            <Viewport />
+            <DesignIntegrityPanel />
+          </div>
+        ) : (
+          <ExportWorkspace />
+        )}
         <div
           className="sidebar-resizer right"
           role="separator"

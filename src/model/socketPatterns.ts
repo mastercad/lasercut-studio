@@ -66,6 +66,8 @@ export function buildSocketPattern(
       panel.size[slotAxis],
     ),
     slotWidth,
+    targetThickness: options.targetThickness,
+    clearance: options.clearance,
     socketType: options.socketType ?? 'cross',
     entrySide: options.entrySide ?? 'positive',
     depthRatio: Math.min(1, Math.max(0.05, options.depthRatio ?? 0.5)),

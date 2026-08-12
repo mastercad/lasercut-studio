@@ -59,6 +59,8 @@ export function LaserManager() {
   const [machineOpen, setMachineOpen] = useState(false)
   const [machineName, setMachineName] = useState(active?.name ?? '')
   const [watts, setWatts] = useState(active?.powerWatts ?? 10)
+  const [bedWidth, setBedWidth] = useState(active?.bedWidth ?? 400)
+  const [bedHeight, setBedHeight] = useState(active?.bedHeight ?? 400)
   const [unit, setUnit] = useState<'mm/min' | 'mm/s'>(
     active?.speedUnit ?? 'mm/min',
   )
@@ -67,6 +69,8 @@ export function LaserManager() {
     if (active) {
       setMachineName(active.name)
       setWatts(active.powerWatts)
+      setBedWidth(active.bedWidth ?? 400)
+      setBedHeight(active.bedHeight ?? 400)
       setUnit(active.speedUnit)
       setNotes(active.notes)
       setEditing(null)
@@ -263,6 +267,30 @@ export function LaserManager() {
               </select>
             </label>
           </div>
+          <div className="laser-pair">
+            <label>
+              <span>Arbeitsbereich X (mm)</span>
+              <input
+                type="number"
+                min="1"
+                value={bedWidth}
+                onChange={(event) =>
+                  setBedWidth(Math.max(1, Number(event.target.value)))
+                }
+              />
+            </label>
+            <label>
+              <span>Arbeitsbereich Y (mm)</span>
+              <input
+                type="number"
+                min="1"
+                value={bedHeight}
+                onChange={(event) =>
+                  setBedHeight(Math.max(1, Number(event.target.value)))
+                }
+              />
+            </label>
+          </div>
           <label>
             <span>Notizen</span>
             <textarea
@@ -276,6 +304,8 @@ export function LaserManager() {
                 updateLaser(active.id, {
                   name: machineName.trim() || 'Lasercutter',
                   powerWatts: watts,
+                  bedWidth,
+                  bedHeight,
                   speedUnit: unit,
                   notes,
                 })
@@ -289,6 +319,8 @@ export function LaserManager() {
                 addLaser({
                   name: `${machineName.trim() || 'Lasercutter'} Kopie`,
                   powerWatts: watts,
+                  bedWidth,
+                  bedHeight,
                   speedUnit: unit,
                   notes,
                 })

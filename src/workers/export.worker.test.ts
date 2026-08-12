@@ -110,6 +110,8 @@ describe('export worker', () => {
     const success = workerScope.postMessage.mock.calls.at(-1)![0]
     expect(success).toMatchObject({ id: 6, ok: true })
     expect(success.result).toContain('<svg')
+    expect(success.result).toContain('data-sheet="1"')
+    expect(success.result).not.toContain('<text')
     await send({
       id: 7,
       type: 'preview',
@@ -120,6 +122,52 @@ describe('export worker', () => {
       ok: false,
       error: 'Das Material für die Vorschau wurde nicht gefunden.',
     })
+  })
+
+  it('rejects oversized parts during analysis and previews multiple real sheets', async () => {
+    const payload = commonPayload()
+    const template = payload.panels[0]
+    const panel = (id: string, size: [number, number, number]) => ({
+      ...template,
+      id,
+      label: id,
+      size,
+      position: [0, 0, 0] as [number, number, number],
+      rotation: [0, 0, 0] as [number, number, number],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      shape: undefined,
+    })
+    const oversized = {
+      ...payload,
+      panels: [panel('Grundplatte', [420, 100, 3])],
+    }
+    await send({ id: 70, type: 'analyze', payload: oversized })
+    expect(workerScope.postMessage.mock.calls.at(-1)![0]).toMatchObject({
+      id: 70,
+      ok: false,
+    })
+    expect(workerScope.postMessage.mock.calls.at(-1)![0].error).toMatch(
+      /Grundplatte.*420\.0.*passt nicht/,
+    )
+
+    const multiple = {
+      ...payload,
+      panels: Array.from({ length: 4 }, (_, index) =>
+        panel(`Teil ${index + 1}`, [200, 200, 3]),
+      ),
+    }
+    await send({
+      id: 71,
+      type: 'preview',
+      payload: { ...multiple, materialId: defaultMaterials[0].id },
+    })
+    const result = workerScope.postMessage.mock.calls.at(-1)![0]
+    expect(result).toMatchObject({ id: 71, ok: true })
+    expect(result.result).toContain('data-sheet="1"')
+    expect(result.result).toContain('data-sheet="4"')
+    expect(result.result).not.toContain('<text')
   })
 
   it('creates a transferable ZIP package buffer', async () => {

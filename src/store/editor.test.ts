@@ -438,8 +438,8 @@ describe('editor object operations', () => {
       ['Außenring', 'acrylic-3', 3],
       ['Einleger', 'birch-5', 5],
     ])
-    expect(imported[0].position).toEqual([0, 15, 0])
-    expect(imported[1].position).toEqual([-20, -20, 0])
+    expect(imported[0].position).toEqual([-15, 0, 0])
+    expect(imported[1].position).toEqual([35, 5, 0])
     const overlaps =
       Math.abs(imported[0].position[0] - imported[1].position[0]) <
         (imported[0].size[0] + imported[1].size[0]) / 2 &&
@@ -1312,6 +1312,79 @@ describe('editor object operations', () => {
     expect(leftSlot.size[2]).toBe(5)
   })
 
+  it('preserves a 5 mm socket pattern when a cross-joint panel changes to 3 mm and moves away', () => {
+    const receiver = {
+      ...createBoxPanels(defaultBox)[0],
+      id: 'socket-receiver',
+      label: 'Socket receiver',
+      size: [80, 100, 5] as [number, number, number],
+      position: [0, 0, 0] as [number, number, number],
+      rotation: [0, 0, 0] as [number, number, number],
+      materialId: 'birch-5',
+      cuts: [],
+      jointFeatures: [],
+    }
+    const inserted = {
+      ...receiver,
+      id: 'inserted-panel',
+      label: 'Inserted panel',
+      size: [5, 100, 80] as [number, number, number],
+      materialId: 'birch-5',
+    }
+    useEditor.setState({
+      panels: [receiver, inserted],
+      groups: [],
+      selectedPanels: [receiver.id],
+      snapEnabled: true,
+    })
+    useEditor.getState().createSocketPattern({
+      count: 1,
+      span: 0,
+      slotLength: 50,
+      targetThickness: 5,
+      clearance: 0,
+      distributionAxis: 0,
+      socketType: 'cross',
+      entrySide: 'positive',
+      depthRatio: 0.5,
+    })
+    const pattern = useEditor.getState().socketPatterns[0]
+    useEditor.setState({ selectedPanels: [receiver.id, inserted.id] })
+    useEditor.getState().createCrossJoint({
+      ratio: 0.5,
+      fit: 'tight',
+      clearance: 0,
+      firstFromHigh: true,
+    })
+    useEditor.setState({ selectedPanels: [inserted.id] })
+    useEditor.getState().assignMaterial('birch-3')
+
+    let state = useEditor.getState()
+    expect(state.crossJoints).toHaveLength(1)
+    expect(
+      state.panels
+        .find((panel) => panel.id === receiver.id)!
+        .cuts.find((cut) => cut.socketPatternId === pattern.id)!.size[0],
+    ).toBe(5)
+    expect(
+      state.panels
+        .find((panel) => panel.id === receiver.id)!
+        .cuts.find((cut) => cut.jointId === state.crossJoints[0].id)!.size[0],
+    ).toBe(3)
+
+    useEditor.getState().movePanel(inserted.id, [100, 0, 0])
+    state = useEditor.getState()
+    const receiverAfterMove = state.panels.find(
+      (panel) => panel.id === receiver.id,
+    )!
+    expect(state.crossJoints).toEqual([])
+    expect(receiverAfterMove.cuts).toHaveLength(1)
+    expect(receiverAfterMove.cuts[0]).toMatchObject({
+      socketPatternId: pattern.id,
+      size: [5, 50.1, 5.2],
+    })
+  })
+
   it('stores a non-destructive boolean and hides its tool', () => {
     useEditor.setState({ selectedPanels: ['front', 'left'] })
     useEditor.getState().applyBoolean('subtract')
@@ -1376,6 +1449,67 @@ describe('editor object operations', () => {
       useEditor.getState().panels.find((panel) => panel.id === 'front')!
         .position,
     ).toEqual([20, 30, 40])
+  })
+
+  it('clears an inspection focus when a new transform begins', () => {
+    useEditor.getState().setInspectionFocus({
+      requestId: 1,
+      sourceId: 'cut',
+      panelId: 'front',
+      center: [0, 0, 0],
+      size: [5, 10, 3],
+    })
+
+    useEditor.getState().beginTransform()
+
+    expect(useEditor.getState().inspectionFocus).toBeNull()
+    useEditor.getState().endTransform()
+  })
+
+  it('clears an inspection focus when another panel is selected', () => {
+    useEditor.getState().setInspectionFocus({
+      requestId: 1,
+      sourceId: 'cut',
+      panelId: 'front',
+      center: [0, 0, 0],
+      size: [5, 10, 3],
+    })
+
+    useEditor.getState().selectPanel('left')
+
+    expect(useEditor.getState().inspectionFocus).toBeNull()
+  })
+
+  it('clears an inspection focus when its cut is removed', () => {
+    useEditor.setState((state) => ({
+      panels: state.panels.map((panel) =>
+        panel.id === 'front'
+          ? {
+              ...panel,
+              cuts: [
+                ...panel.cuts,
+                {
+                  id: 'focused-cut',
+                  kind: 'hole' as const,
+                  center: [0, 0, 0] as [number, number, number],
+                  size: [5, 10, 3] as [number, number, number],
+                },
+              ],
+            }
+          : panel,
+      ),
+    }))
+    useEditor.getState().setInspectionFocus({
+      requestId: 1,
+      sourceId: 'focused-cut',
+      panelId: 'front',
+      center: [0, 0, 0],
+      size: [5, 10, 3],
+    })
+
+    useEditor.getState().removeCut('front', 'focused-cut')
+
+    expect(useEditor.getState().inspectionFocus).toBeNull()
   })
 
   it('serializes and restores the complete project including undo history', () => {

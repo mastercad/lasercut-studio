@@ -12,6 +12,8 @@ import {
   createProfiledMaterialSvg,
   defaultLaserCutters,
   extractPanelContours,
+  packRectangles,
+  splitPanelsIntoSheets,
 } from './export'
 import { createExportPackage } from './export'
 import JSZip from 'jszip'
@@ -133,6 +135,58 @@ describe('LightBurn export', () => {
     expect(Number(height)).toBeGreaterThan(100)
   })
 
+  it('fills free space below tall parts instead of reserving whole shelves', () => {
+    const packed = packRectangles(
+      [
+        { id: 'tall', width: 60, height: 100 },
+        { id: 'wide', width: 100, height: 40 },
+        { id: 'small-a', width: 40, height: 40 },
+        { id: 'small-b', width: 40, height: 40 },
+      ],
+      0,
+      0,
+    )
+    const rectangles = packed.placed.map((item) => ({
+      id: item.id,
+      x: item.offset[0],
+      y: item.offset[1],
+      width: item.width,
+      height: item.height,
+    }))
+
+    for (const [index, item] of rectangles.entries()) {
+      for (const other of rectangles.slice(index + 1)) {
+        expect(
+          item.x < other.x + other.width &&
+            item.x + item.width > other.x &&
+            item.y < other.y + other.height &&
+            item.y + item.height > other.y,
+        ).toBe(false)
+      }
+    }
+    expect(packed.width * packed.height).toBeLessThanOrEqual(16_000)
+  })
+
+  it('splits material parts across the configured laser sheets', () => {
+    const panels = Array.from({ length: 3 }, (_, index): PanelDefinition => ({
+      id: `sheet-part-${index}`,
+      label: `Sheet part ${index}`,
+      size: [80, 80, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      materialId: defaultMaterials[0].id,
+    }))
+
+    expect(splitPanelsIntoSheets(panels, panels, 110, 110)).toHaveLength(3)
+    expect(() => splitPanelsIntoSheets(panels, panels, 70, 110)).toThrow(
+      /passt nicht auf die Schnittfläche/,
+    )
+  })
+
   it('attaches every partially overlapping engraving regardless of its depth', () => {
     const material = defaultMaterials[0]
     const profiles = createDefaultProcessingProfiles()
@@ -213,6 +267,142 @@ describe('LightBurn export', () => {
     expect(svg).toContain('data-object-id="engraving-text"')
     expect(svg).toContain('data-object-id="engraving-shape"')
     expect(svg).toContain('viewBox="0 0 120 70"')
+  })
+
+  it('attaches an engraving to the nearest of overlapping parallel panels', () => {
+    const material = defaultMaterials[0]
+    const profiles = createDefaultProcessingProfiles()
+    const engravingProfile = profiles.find(
+      (profile) => profile.geometry === 'fill',
+    )!
+    const panel = (id: string, z: number): PanelDefinition => ({
+      id,
+      label: id,
+      size: [40, 30, 3],
+      position: [0, 0, z],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      materialId: material.id,
+      autoCut: true,
+      processingAssignments: [],
+    })
+    const near = panel('near', 0)
+    const far = panel('far', 40)
+    const engraving: PanelDefinition = {
+      ...panel('engraving', 1),
+      size: [10, 6, 3],
+      autoCut: false,
+      processingAssignments: [
+        { id: 'engraving', profileId: engravingProfile.id, geometry: 'fill' },
+      ],
+      shape: { type: 'rectangle' },
+    }
+    const contours = (item: PanelDefinition) => ({
+      outer: [
+        [
+          [0, 0],
+          [item.size[0], 0],
+          [item.size[0], item.size[1]],
+          [0, item.size[1]],
+        ] as [number, number][],
+      ],
+      inner: [],
+      width: item.size[0],
+      height: item.size[1],
+      minX: -item.size[0] / 2,
+      maxY: item.size[1] / 2,
+    })
+    const svg = createProfiledMaterialSvg(
+      material,
+      [near, far, engraving],
+      [near, far, engraving],
+      profiles,
+      createDefaultProcessingRecipes(
+        profiles,
+        defaultLaserCutters,
+        defaultMaterials,
+      ),
+      defaultLaserCutters[0].id,
+      undefined,
+      [],
+      contours,
+    )
+
+    const engravingPath = svg.match(
+      /data-object-id="engraving" d="([^"]+)"/,
+    )?.[1]
+    expect(engravingPath).toContain('M 25.000,22.000')
+  })
+
+  it('keeps engraving readable when it lies on the opposite panel face', () => {
+    const material = defaultMaterials[0]
+    const profiles = createDefaultProcessingProfiles()
+    const engravingProfile = profiles.find(
+      (profile) => profile.geometry === 'fill',
+    )!
+    const host: PanelDefinition = {
+      id: 'host',
+      label: 'host',
+      size: [40, 30, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      materialId: material.id,
+      autoCut: true,
+      processingAssignments: [],
+    }
+    const engraving: PanelDefinition = {
+      ...host,
+      id: 'engraving',
+      label: 'engraving',
+      size: [10, 6, 3],
+      rotation: [0, Math.PI, 0],
+      autoCut: false,
+      processingAssignments: [
+        { id: 'engraving', profileId: engravingProfile.id, geometry: 'fill' },
+      ],
+      shape: { type: 'rectangle' },
+    }
+    const contours = (item: PanelDefinition) => ({
+      outer: [
+        [
+          [0, 0],
+          [item.size[0], 0],
+          [item.size[0], item.size[1]],
+          [0, item.size[1]],
+        ] as [number, number][],
+      ],
+      inner: [],
+      width: item.size[0],
+      height: item.size[1],
+      minX: -item.size[0] / 2,
+      maxY: item.size[1] / 2,
+    })
+    const svg = createProfiledMaterialSvg(
+      material,
+      [host, engraving],
+      [host, engraving],
+      profiles,
+      createDefaultProcessingRecipes(
+        profiles,
+        defaultLaserCutters,
+        defaultMaterials,
+      ),
+      defaultLaserCutters[0].id,
+      undefined,
+      [],
+      contours,
+    )
+
+    expect(svg.match(/data-object-id="engraving" d="([^"]+)"/)?.[1]).toBe(
+      'M 25.000,22.000 L 35.000,22.000 L 35.000,28.000 L 25.000,28.000 Z',
+    )
   })
 
   it('separates through holes from the exterior contour', () => {
@@ -475,6 +665,44 @@ describe('LightBurn export', () => {
     expect(manifest.version).toBe(5)
     expect(manifest.files).toContain('Birke_Multiplex_3mm.dxf')
     expect(manifest.files).toContain('Birke_Multiplex_3mm.lbrn2')
+  })
+
+  it('exports one file set per required laser sheet', async () => {
+    const material = defaultMaterials[0]
+    const panels = Array.from({ length: 2 }, (_, index): PanelDefinition => ({
+      id: `page-${index}`,
+      label: `Page ${index}`,
+      size: [80, 80, 3],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+      materialId: material.id,
+    }))
+    const profiles = createDefaultProcessingProfiles()
+    const laser = { ...defaultLaserCutters[0], bedWidth: 110, bedHeight: 110 }
+    const blob = await createExportPackage(
+      [material],
+      panels,
+      createDefaultExportLayers([material]),
+      laser,
+      createDefaultLaserPresets([laser], [material]),
+      [],
+      [],
+      profiles,
+      createDefaultProcessingRecipes(profiles, [laser], [material]),
+    )
+    const zip = await JSZip.loadAsync(await blob.arrayBuffer())
+
+    expect(zip.file('Birke_Multiplex_3mm_Blatt_1.svg')).not.toBeNull()
+    expect(zip.file('Birke_Multiplex_3mm_Blatt_2.svg')).not.toBeNull()
+    expect(zip.file('Birke_Multiplex_3mm_Blatt_2.lbrn2')).not.toBeNull()
+    const firstSvg = await zip
+      .file('Birke_Multiplex_3mm_Blatt_1.svg')!
+      .async('string')
+    expect(firstSvg).toContain('width="100mm" height="100mm"')
   })
 
   it('builds only used profile layers and keeps automatic inner cuts before outer cuts', () => {

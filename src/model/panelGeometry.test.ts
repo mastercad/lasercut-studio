@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Mesh, Raycaster, Vector3 } from 'three'
 import {
   clearEvaluatedGeometryCache,
   createCachedEvaluatedPanelGeometry,
@@ -291,6 +292,49 @@ describe('CSG panel geometry', () => {
     geometry.computeBoundingBox()
     expect(geometry.boundingBox?.max.x).toBeCloseTo(40)
     geometry.dispose()
+  })
+
+  it('keeps a wider persistent recess authoritative over an overlapping joint cut', () => {
+    const base: PanelDefinition = {
+      id: 'overlapping-recesses',
+      label: 'Overlapping recesses',
+      size: [80, 100, 5],
+      position: [0, 0, 0],
+      rotation: [0, 0, 0],
+      cuts: [],
+      booleanModifiers: [],
+      jointFeatures: [],
+      hidden: false,
+    }
+    const persistent = {
+      id: 'socket-pattern-cut',
+      kind: 'hole' as const,
+      center: [0, 25, 0] as [number, number, number],
+      size: [5, 50.1, 5.2] as [number, number, number],
+      socketPatternId: 'socket-pattern',
+    }
+    const dynamic = {
+      id: 'cross-joint-cut',
+      kind: 'half-lap' as const,
+      center: [0, 25, 0] as [number, number, number],
+      size: [3, 51, 7] as [number, number, number],
+      jointId: 'cross-joint',
+    }
+    const persistentOnly = createPanelGeometry({
+      ...base,
+      cuts: [persistent],
+    })
+    const overlapping = createPanelGeometry({
+      ...base,
+      // Deliberately use the problematic persisted-before-derived state order.
+      cuts: [persistent, dynamic],
+    })
+
+    const ray = new Raycaster(new Vector3(2, 25, 10), new Vector3(0, 0, -1))
+    expect(ray.intersectObject(new Mesh(persistentOnly))).toHaveLength(0)
+    expect(ray.intersectObject(new Mesh(overlapping))).toHaveLength(0)
+    persistentOnly.dispose()
+    overlapping.dispose()
   })
 
   it('retains imported cut-text operations in the panel geometry', () => {

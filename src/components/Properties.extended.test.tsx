@@ -34,6 +34,7 @@ beforeEach(() => {
     crossJoints: [],
     processingProfiles: createDefaultProcessingProfiles(),
     rotationPreview: null,
+    inspectionFocus: null,
   })
 })
 afterEach(cleanup)
@@ -235,6 +236,168 @@ describe('Properties complete category interactions', () => {
     ).toEqual([])
   })
 
+  it('focuses cuts and complete connections without coupling remove actions', () => {
+    const panels = useEditor.getState().panels.map((panel) =>
+      panel.id === 'front'
+        ? {
+            ...panel,
+            cuts: [
+              {
+                id: 'manual-cut',
+                kind: 'hole' as const,
+                center: [10, 20, 0] as [number, number, number],
+                size: [5, 12, 3] as [number, number, number],
+              },
+              {
+                id: 'joint-cut',
+                jointId: 'cross-focus',
+                kind: 'half-lap' as const,
+                center: [-15, 10, 0] as [number, number, number],
+                size: [5, 20, 3] as [number, number, number],
+              },
+            ],
+          }
+        : panel,
+    )
+    act(() =>
+      useEditor.setState({
+        panels,
+        selectedPanels: ['front'],
+        crossJoints: [
+          {
+            id: 'cross-focus',
+            firstPanelId: 'front',
+            secondPanelId: 'left',
+            ratio: 0.5,
+            fit: 'tight',
+            clearance: 0,
+          },
+        ],
+      }),
+    )
+    const { container } = render(<Properties />)
+
+    fireEvent.click(within(container).getByText('Rechteckiger Durchbruch 1'))
+    expect(useEditor.getState().inspectionFocus).toMatchObject({
+      sourceId: 'manual-cut',
+      panelId: 'front',
+      center: [10, 20, 0],
+      size: [5, 12, 3],
+    })
+    fireEvent.click(within(container).getByText('Rechteckiger Durchbruch 1'))
+    expect(useEditor.getState().inspectionFocus).toBeNull()
+
+    fireEvent.click(within(container).getByText('Steckkreuz'))
+    expect(useEditor.getState().inspectionFocus).toMatchObject({
+      sourceId: 'cross-focus',
+      panelId: 'front',
+      center: [-15, 10, 0],
+      size: [5, 20, 3],
+    })
+    fireEvent.click(within(container).getByText('Steckkreuz'))
+    expect(useEditor.getState().inspectionFocus).toBeNull()
+    fireEvent.click(within(container).getByText('Steckkreuz'))
+
+    const connection = container.querySelector<HTMLElement>('.joint-card')!
+    fireEvent.click(within(connection).getByText('Entfernen'))
+    expect(useEditor.getState().crossJoints).toEqual([])
+    expect(useEditor.getState().inspectionFocus).toBeNull()
+  })
+
+  it('keeps an external corner strip while clipping only its thickness', () => {
+    const panels = useEditor.getState().panels.map((panel) =>
+      panel.id === 'front'
+        ? {
+            ...panel,
+            size: [420, 100, 5] as [number, number, number],
+            jointFeatures: [
+              {
+                id: 'first-tab',
+                jointId: 'external-corner',
+                operation: 'add' as const,
+                shape: 'box' as const,
+                center: [204, -52.5, 0] as [number, number, number],
+                size: [11.98, 5, 5] as [number, number, number],
+              },
+              {
+                id: 'oversized-slot',
+                jointId: 'external-corner',
+                operation: 'subtract' as const,
+                shape: 'box' as const,
+                center: [0, -52.5, 0] as [number, number, number],
+                size: [12, 5, 7] as [number, number, number],
+              },
+              {
+                id: 'last-tab',
+                jointId: 'external-corner',
+                operation: 'add' as const,
+                shape: 'box' as const,
+                center: [-204, -52.5, 0] as [number, number, number],
+                size: [11.98, 5, 5] as [number, number, number],
+              },
+            ],
+          }
+        : panel,
+    )
+    act(() =>
+      useEditor.setState({
+        panels,
+        selectedPanels: ['front'],
+        fingerJoints: [
+          {
+            id: 'external-corner',
+            firstPanelId: 'front',
+            secondPanelId: 'left',
+            connectionType: 'corner',
+            fingerWidth: 12,
+            fit: 'tight',
+            clearance: 0,
+            style: 'straight',
+            reliefDiameter: 1,
+          },
+        ],
+      }),
+    )
+    const { container } = render(<Properties />)
+
+    fireEvent.click(within(container).getByText('Eckverbindung'))
+
+    expect(useEditor.getState().inspectionFocus).toMatchObject({
+      sourceId: 'external-corner',
+      panelId: 'front',
+      center: [0, -52.5, 0],
+      size: [419.98, 5, 5],
+    })
+  })
+
+  it('clips oversized boolean cutters to the visible panel opening', () => {
+    const panels = useEditor.getState().panels.map((panel) =>
+      panel.id === 'front'
+        ? {
+            ...panel,
+            size: [80, 100, 5] as [number, number, number],
+            cuts: [
+              {
+                id: 'oversized-half-lap',
+                jointId: 'cross-joint',
+                kind: 'half-lap' as const,
+                center: [0, 25.5, 0] as [number, number, number],
+                size: [5, 51, 7] as [number, number, number],
+              },
+            ],
+          }
+        : panel,
+    )
+    act(() => useEditor.setState({ panels, selectedPanels: ['front'] }))
+    const { container } = render(<Properties />)
+
+    fireEvent.click(within(container).getByText('50/50-Steckschlitz 1'))
+    expect(useEditor.getState().inspectionFocus).toMatchObject({
+      center: [0, 25, 0],
+      size: [5, 50, 5],
+    })
+  })
+
   it('toggles automatic cutting and adds, removes and manages processing profiles', async () => {
     select('front')
     const user = userEvent.setup()
@@ -311,7 +474,11 @@ describe('Properties complete category interactions', () => {
     const { container } = render(<Properties />)
     const builder = container.querySelector<HTMLElement>('.connection-builder')!
     expect(builder).not.toBeNull()
-    fireEvent.click(within(builder).getByText('Öffnen & Vorschau anzeigen'))
+    expect(
+      within(builder).getByText(
+        'Wähle die Verbindungsart und prüfe die Vorschau direkt am Modell.',
+      ),
+    ).toBeVisible()
     fireEvent.change(
       within(builder)
         .getByText('Fingerbreite')
@@ -347,7 +514,7 @@ describe('Properties complete category interactions', () => {
         .querySelector('input')!,
       { target: { value: '0.1' } },
     )
-    fireEvent.click(within(builder).getByText('Verbindung erzeugen'))
+    fireEvent.click(within(builder).getByText('Verbindung jetzt erstellen'))
     expect(useEditor.getState().fingerJoints[0]).toMatchObject({
       connectionType: 'corner',
       fingerWidth: 2,
@@ -378,7 +545,6 @@ describe('Properties complete category interactions', () => {
     )
     const { container } = render(<Properties />)
     const builder = container.querySelector<HTMLElement>('.connection-builder')!
-    fireEvent.click(within(builder).getByText('Öffnen & Vorschau anzeigen'))
     const type = within(builder)
       .getByText('Verbindungsart')
       .closest('label')!
@@ -398,7 +564,7 @@ describe('Properties complete category interactions', () => {
     expect(
       within(builder).getByText(/Teil 1: 90% von unten/),
     ).toBeInTheDocument()
-    fireEvent.click(within(builder).getByText('Verbindung erzeugen'))
+    fireEvent.click(within(builder).getByText('Verbindung jetzt erstellen'))
     expect(useEditor.getState().crossJoints[0]).toMatchObject({
       ratio: 0.9,
       firstFromHigh: false,

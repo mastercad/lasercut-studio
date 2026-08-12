@@ -79,4 +79,31 @@ describe('smart alignment guides', () => {
       calculateDistanceGuides(moving, moving.position, [right], new Set([0])),
     ).toHaveLength(1)
   })
+
+  it('measures from the visible edge of generated connection geometry', () => {
+    const fixed = {
+      ...panel('fixed', [0, 0, 0]),
+      jointFeatures: [
+        {
+          id: 'extension',
+          jointId: 'joint',
+          operation: 'add' as const,
+          shape: 'box' as const,
+          center: [21.5, 0, 0] as [number, number, number],
+          size: [3, 40, 3] as [number, number, number],
+        },
+      ],
+    }
+    const moving = panel('moving', [45.1, 0, 0])
+
+    const guide = calculateDistanceGuides(
+      moving,
+      moving.position,
+      [fixed],
+      new Set([0]),
+      [moving, fixed],
+    )[0]
+    expect(guide.label).toBe('2,1 mm')
+    expect(Math.abs(guide.points[0][0] - guide.points[1][0])).toBeCloseTo(2.1)
+  })
 })

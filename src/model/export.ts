@@ -31,6 +31,8 @@ export type LaserCutterDefinition = {
   id: string
   name: string
   powerWatts: number
+  bedWidth?: number
+  bedHeight?: number
   speedUnit: 'mm/min' | 'mm/s'
   notes: string
 }
@@ -86,6 +88,8 @@ export const defaultLaserCutters: LaserCutterDefinition[] = [
     id: 'generic-10w',
     name: 'Generischer Diodenlaser',
     powerWatts: 10,
+    bedWidth: 400,
+    bedHeight: 400,
     speedUnit: 'mm/min',
     notes: 'Werte vor dem Lasern an der eigenen Maschine prüfen.',
   },
@@ -585,11 +589,69 @@ export type PackRectangle = {
   height: number
 }
 
-/** Deterministic compact shelf layout shared by import and export. */
+type PackedRectangle<T> = T & { offset: Point }
+
+const packAtWidth = <T extends PackRectangle>(
+  items: Array<{ item: T; index: number }>,
+  contentWidth: number,
+  gap: number,
+  margin: number,
+) => {
+  const placed: Array<PackedRectangle<T>> = []
+  let usedWidth = 0
+  let usedHeight = 0
+
+  for (const { item } of items) {
+    const xCandidates = [margin]
+    const yCandidates = [margin]
+    for (const other of placed) {
+      xCandidates.push(other.offset[0] + other.width + gap)
+      yCandidates.push(other.offset[1] + other.height + gap)
+    }
+
+    let best: Point | undefined
+    for (const y of [...new Set(yCandidates)].sort((a, b) => a - b)) {
+      for (const x of [...new Set(xCandidates)].sort((a, b) => a - b)) {
+        if (x + item.width > margin + contentWidth + 0.000001) continue
+        const overlaps = placed.some(
+          (other) =>
+            x < other.offset[0] + other.width + gap &&
+            x + item.width + gap > other.offset[0] &&
+            y < other.offset[1] + other.height + gap &&
+            y + item.height + gap > other.offset[1],
+        )
+        if (!overlaps) {
+          best = [x, y]
+          break
+        }
+      }
+      if (best) break
+    }
+
+    // The margin candidate always fits vertically because the layout has no
+    // fixed height. This is only a defensive fallback for malformed sizes.
+    const offset = best ?? [margin, usedHeight + margin + gap]
+    placed.push({ ...item, offset })
+    usedWidth = Math.max(usedWidth, offset[0] + item.width - margin)
+    usedHeight = Math.max(usedHeight, offset[1] + item.height - margin)
+  }
+
+  return {
+    placed,
+    width: Math.max(20, usedWidth + margin * 2),
+    height: Math.max(20, usedHeight + margin * 2),
+  }
+}
+
+/** Deterministic best-fit layout shared by import and export. It tries several
+ * widths and places every rectangle at the first free bottom-left corner. In
+ * contrast to a shelf layout, short parts can occupy space below tall parts. */
 export function packRectangles<T extends PackRectangle>(
   items: T[],
   gap = 10,
   margin = 10,
+  maxWidth?: number,
+  maxHeight?: number,
 ) {
   if (!items.length)
     return {
@@ -603,7 +665,7 @@ export function packRectangles<T extends PackRectangle>(
     0,
   )
   const widest = Math.max(...items.map((item) => item.width))
-  const targetWidth = Math.max(widest, Math.sqrt(totalArea * 1.5))
+  const totalWidth = items.reduce((sum, item) => sum + item.width, 0)
   const sorted = items
     .map((item, index) => ({ item, index }))
     .sort(
@@ -613,28 +675,36 @@ export function packRectangles<T extends PackRectangle>(
         a.index - b.index,
     )
 
-  let cursorX = margin
-  let cursorY = margin
-  let rowHeight = 0
-  let usedWidth = 0
-  const placed = sorted.map(({ item }) => {
-    if (cursorX > margin && cursorX + item.width > margin + targetWidth) {
-      cursorX = margin
-      cursorY += rowHeight + gap
-      rowHeight = 0
-    }
-    const offset: Point = [cursorX, cursorY]
-    cursorX += item.width + gap
-    rowHeight = Math.max(rowHeight, item.height)
-    usedWidth = Math.max(usedWidth, cursorX - gap)
-    return { ...item, offset }
-  })
+  const ideal = Math.sqrt(totalArea)
+  const candidateWidths = new Set<number>([widest, totalWidth])
+  for (const factor of [0.75, 0.9, 1, 1.15, 1.3, 1.5, 1.75, 2])
+    candidateWidths.add(Math.max(widest, ideal * factor))
+  for (const { item } of sorted)
+    candidateWidths.add(Math.max(widest, item.width + widest + gap))
 
-  return {
-    placed,
-    width: Math.max(20, usedWidth + margin),
-    height: Math.max(20, cursorY + rowHeight + margin),
-  }
+  const layouts = [...candidateWidths]
+    .filter((width) => maxWidth === undefined || width <= maxWidth - margin * 2)
+    .map((width) => packAtWidth(sorted, width, gap, margin))
+    .filter(
+      (layout) =>
+        (maxWidth === undefined || layout.width <= maxWidth) &&
+        (maxHeight === undefined || layout.height <= maxHeight),
+    )
+    .sort((a, b) => {
+      const score = (layout: typeof a) => {
+        const contentWidth = layout.width - margin * 2
+        const contentHeight = layout.height - margin * 2
+        const aspectPenalty =
+          1 + 0.08 * Math.abs(Math.log(contentWidth / contentHeight))
+        return contentWidth * contentHeight * aspectPenalty
+      }
+      return score(a) - score(b) || a.width - b.width
+    })
+  if (!layouts.length)
+    throw new Error(
+      'Die Teile passen nicht auf die konfigurierte Schnittfläche.',
+    )
+  return layouts[0]
 }
 
 type ExportItem = PackableItem & { panel: PanelDefinition }
@@ -676,9 +746,10 @@ const panelQuaternion = (panel: PanelDefinition) =>
 const isStandaloneEngraving = (panel: PanelDefinition) =>
   panel.autoCut === false && Boolean(panel.processingAssignments?.length)
 
-/** Projects engraving-only geometry onto overlapping cut geometry. Depth is
- * intentionally ignored: the laser job is two-dimensional, so an engraving
- * may sit on, inside, or through its host in the 3D editor. */
+/** Projects engraving-only geometry onto overlapping cut geometry. Plane
+ * distance does not disqualify an engraving (it may sit slightly inside its
+ * host in the editor), but it must decide between otherwise overlapping,
+ * parallel panels. */
 function attachEngravingsToHosts(items: ExportItem[]) {
   const hosts = items.filter((item) => !isStandaloneEngraving(item.panel))
   const hostByEngraving = new Map<
@@ -708,14 +779,24 @@ function attachEngravingsToHosts(items: ExportItem[]) {
         const hostNormal = new Vector3(0, 0, 0)
         hostNormal.setComponent(hostThin, 1)
         hostNormal.applyQuaternion(hostQuaternion).normalize()
-        const aligned = Math.abs(engravingNormal.dot(hostNormal)) > 0.98
+        const normalAlignment = engravingNormal.dot(hostNormal)
+        const aligned = Math.abs(normalAlignment) > 0.98
         const inverseHostQuaternion = hostQuaternion.clone().invert()
         const hostPosition = new Vector3(...host.panel.position)
         const engravingPosition = new Vector3(...engraving.panel.position)
+        const planeDistance = Math.abs(
+          engravingPosition.clone().sub(hostPosition).dot(hostNormal),
+        )
         const transformLoop = (loop: Point[]) =>
           loop.map(([x, y]) => {
             const local = new Vector3()
-            local.setComponent(engravingAxes[0], x + engraving.contours.minX)
+            // Flatten both faces as they are seen from outside. Without this
+            // correction an engraving placed on the panel's negative face is
+            // viewed through the opaque sheet and therefore mirrored.
+            local.setComponent(
+              engravingAxes[0],
+              (normalAlignment < 0 ? -1 : 1) * (x + engraving.contours.minX),
+            )
             local.setComponent(engravingAxes[1], engraving.contours.maxY - y)
             const inHost = local
               .applyQuaternion(engravingQuaternion)
@@ -755,6 +836,7 @@ function attachEngravingsToHosts(items: ExportItem[]) {
           contours: projectedContours,
           overlapArea,
           overlapRatio: overlapArea / projectedArea,
+          planeDistance,
           hostArea: host.contours.width * host.contours.height,
           eligible: aligned && overlapWidth > 0.001 && overlapHeight > 0.001,
         }
@@ -762,6 +844,7 @@ function attachEngravingsToHosts(items: ExportItem[]) {
       .filter((candidate) => candidate.eligible)
       .sort(
         (a, b) =>
+          a.planeDistance - b.planeDistance ||
           b.overlapRatio - a.overlapRatio ||
           b.overlapArea - a.overlapArea ||
           a.hostArea - b.hostArea,
@@ -783,7 +866,12 @@ function attachEngravingsToHosts(items: ExportItem[]) {
  * to use. Sorting tall parts first keeps shelf heights stable and gives a
  * deterministic, reasonably square layout without rotating user geometry.
  */
-function packItems<T extends PackableItem>(items: T[], gap = 10, margin = 10) {
+function packItems<T extends PackableItem>(
+  items: T[],
+  gap = 10,
+  margin = 10,
+  sheetSize?: { width: number; height: number },
+) {
   const packed = packRectangles(
     items.map((item) => ({
       item,
@@ -792,6 +880,8 @@ function packItems<T extends PackableItem>(items: T[], gap = 10, margin = 10) {
     })),
     gap,
     margin,
+    sheetSize?.width,
+    sheetSize?.height,
   )
   return {
     ...packed,
@@ -799,13 +889,80 @@ function packItems<T extends PackableItem>(items: T[], gap = 10, margin = 10) {
   }
 }
 
-function placeExportItems(items: ExportItem[], gap = 10, margin = 10) {
+export function splitPanelsIntoSheets(
+  materialPanels: PanelDefinition[],
+  allPanels: PanelDefinition[],
+  bedWidth: number,
+  bedHeight: number,
+  contoursFor: ContourProvider = extractPanelContours,
+  gap = 10,
+  margin = 10,
+) {
+  const usableWidth = bedWidth - margin * 2
+  const usableHeight = bedHeight - margin * 2
+  if (usableWidth <= 0 || usableHeight <= 0)
+    throw new Error('Die konfigurierte Schnittfläche ist zu klein.')
+  const items = materialPanels
+    .filter((panel) => !panel.hidden && panel.visible !== false)
+    .map((panel, index) => ({
+      panel,
+      index,
+      contours: contoursFor(panel, allPanels),
+    }))
+    .filter((item) => item.contours.outer.length || item.contours.inner.length)
+    .sort(
+      (a, b) =>
+        b.contours.height - a.contours.height ||
+        b.contours.width - a.contours.width ||
+        a.index - b.index,
+    )
+  type Sheet = {
+    panels: PanelDefinition[]
+    cursorX: number
+    cursorY: number
+    rowHeight: number
+  }
+  const sheets: Sheet[] = []
+  for (const item of items) {
+    const { width, height } = item.contours
+    if (width > usableWidth || height > usableHeight)
+      throw new Error(
+        `„${item.panel.label}“ (${width.toFixed(1)} × ${height.toFixed(1)} mm) passt nicht auf die Schnittfläche ${bedWidth} × ${bedHeight} mm.`,
+      )
+    let target = sheets.find((sheet) => {
+      const fitsRow =
+        sheet.cursorX === 0 || sheet.cursorX + width <= usableWidth
+      const y = fitsRow ? sheet.cursorY : sheet.cursorY + sheet.rowHeight + gap
+      return y + height <= usableHeight
+    })
+    if (!target) {
+      target = { panels: [], cursorX: 0, cursorY: 0, rowHeight: 0 }
+      sheets.push(target)
+    }
+    if (target.cursorX > 0 && target.cursorX + width > usableWidth) {
+      target.cursorX = 0
+      target.cursorY += target.rowHeight + gap
+      target.rowHeight = 0
+    }
+    target.panels.push(item.panel)
+    target.cursorX += width + gap
+    target.rowHeight = Math.max(target.rowHeight, height)
+  }
+  return sheets.map((sheet) => sheet.panels)
+}
+
+function placeExportItems(
+  items: ExportItem[],
+  gap = 10,
+  margin = 10,
+  sheetSize?: { width: number; height: number },
+) {
   const { hosts, hostByEngraving } = attachEngravingsToHosts(items)
   const unattached = items.filter(
     (item) =>
       !isStandaloneEngraving(item.panel) || !hostByEngraving.has(item.panel.id),
   )
-  const packed = packItems(unattached, gap, margin)
+  const packed = packItems(unattached, gap, margin, sheetSize)
   const placedById = new Map(
     packed.placed.map((item) => [item.panel.id, item] as const),
   )
@@ -1009,6 +1166,7 @@ export function createProfiledMaterialSvg(
   cutPreset?: LaserPreset | CutPresets,
   groups: ExportGroupInfo[] = [],
   contoursFor: ContourProvider = extractPanelContours,
+  sheetSize?: { width: number; height: number },
 ) {
   const gap = 10,
     margin = 10
@@ -1016,7 +1174,12 @@ export function createProfiledMaterialSvg(
     .filter((panel) => !panel.hidden && panel.visible !== false)
     .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
     .filter((item) => item.contours.outer.length || item.contours.inner.length)
-  const { placed, width, height } = placeExportItems(items, gap, margin)
+  const { placed, width, height } = placeExportItems(
+    items,
+    gap,
+    margin,
+    sheetSize,
+  )
   const steps = buildProjectExportSteps(
     material,
     materialPanels,
@@ -1076,12 +1239,13 @@ export function createProfiledMaterialDxf(
   laserId: string,
   cutPreset?: LaserPreset | CutPresets,
   contoursFor: ContourProvider = extractPanelContours,
+  sheetSize?: { width: number; height: number },
 ) {
   const items = materialPanels
     .filter((panel) => !panel.hidden && panel.visible !== false)
     .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
     .filter((item) => item.contours.outer.length || item.contours.inner.length)
-  const { placed, width, height } = placeExportItems(items, 10, 10)
+  const { placed, width, height } = placeExportItems(items, 10, 10, sheetSize)
   const steps = buildProjectExportSteps(
     material,
     materialPanels,
@@ -1124,12 +1288,13 @@ export function createProfiledMaterialLbrn2(
   laser: LaserCutterDefinition,
   cutPreset?: LaserPreset | CutPresets,
   contoursFor: ContourProvider = extractPanelContours,
+  sheetSize?: { width: number; height: number },
 ) {
   const items = materialPanels
     .filter((panel) => !panel.hidden && panel.visible !== false)
     .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
     .filter((item) => item.contours.outer.length || item.contours.inner.length)
-  const { placed } = placeExportItems(items, 10, 10)
+  const { placed } = placeExportItems(items, 10, 10, sheetSize)
   const steps = buildProjectExportSteps(
     material,
     materialPanels,
@@ -1166,6 +1331,7 @@ export function createMaterialSvg(
   layers: ExportLayerDefinition[],
   groups: ExportGroupInfo[] = [],
   laserTexts: LaserTextDefinition[] = [],
+  sheetSize?: { width: number; height: number },
 ) {
   const gap = 10,
     margin = 10
@@ -1176,7 +1342,12 @@ export function createMaterialSvg(
       contours: extractPanelContours(panel, allPanels),
     }))
     .filter((item) => item.contours.outer.length || item.contours.inner.length)
-  const { placed, width, height } = placeExportItems(items, gap, margin)
+  const { placed, width, height } = placeExportItems(
+    items,
+    gap,
+    margin,
+    sheetSize,
+  )
   const materialLayers = layers
     .filter((layer) => layer.materialId === material.id)
     .sort((a, b) => a.order - b.order)
@@ -1261,12 +1432,13 @@ export function createMaterialDxf(
   allPanels: PanelDefinition[],
   layers: ExportLayerDefinition[],
   contoursFor: ContourProvider = extractPanelContours,
+  sheetSize?: { width: number; height: number },
 ) {
   const items = materialPanels
     .filter((panel) => !panel.hidden && panel.visible !== false)
     .map((panel) => ({ panel, contours: contoursFor(panel, allPanels) }))
     .filter((item) => item.contours.outer.length || item.contours.inner.length)
-  const { placed, width, height } = placeExportItems(items, 10, 10)
+  const { placed, width, height } = placeExportItems(items, 10, 10, sheetSize)
   const materialLayers = layers
     .filter((layer) => layer.materialId === material.id && layer.output)
     .sort((a, b) => a.order - b.order)
@@ -1322,6 +1494,7 @@ export async function createExportPackage(
         panel.materialId === material.id,
     ),
   )
+  const generatedFiles: string[] = []
   for (const material of usedMaterials) {
     const materialPanels = panels.filter(
       (panel) => panel.materialId === material.id,
@@ -1340,66 +1513,92 @@ export async function createExportPackage(
           preset.operation === 'cut-outer',
       ),
     }
-    const baseName = `${safeName(material.name)}_${material.thickness}mm`
     const profiled = Boolean(processingProfiles && laser)
-    zip.file(
-      `${baseName}.svg`,
-      profiled
-        ? createProfiledMaterialSvg(
-            material,
-            materialPanels,
-            panels,
-            processingProfiles!,
-            processingRecipes,
-            laser!.id,
-            cutPreset,
-            groups,
-            contoursFor,
-          )
-        : createMaterialSvg(
-            material,
-            materialPanels,
-            panels,
-            layers,
-            groups,
-            laserTexts,
-          ),
-    )
-    zip.file(
-      `${baseName}.dxf`,
-      profiled
-        ? createProfiledMaterialDxf(
-            material,
-            materialPanels,
-            panels,
-            processingProfiles!,
-            processingRecipes,
-            laser!.id,
-            cutPreset,
-            contoursFor,
-          )
-        : createMaterialDxf(
-            material,
-            materialPanels,
-            panels,
-            layers,
-            contoursFor,
-          ),
-    )
-    if (profiled)
-      zip.file(
-        `${baseName}.lbrn2`,
-        createProfiledMaterialLbrn2(
-          material,
+    const sheets = laser
+      ? splitPanelsIntoSheets(
           materialPanels,
           panels,
-          processingProfiles!,
-          processingRecipes,
-          laser!,
-          cutPreset,
+          laser.bedWidth ?? 400,
+          laser.bedHeight ?? 400,
           contoursFor,
-        ),
+        )
+      : [materialPanels]
+    for (const [sheetIndex, sheetPanels] of sheets.entries()) {
+      const sheetSize = laser
+        ? { width: laser.bedWidth ?? 400, height: laser.bedHeight ?? 400 }
+        : undefined
+      const sheetSuffix = sheets.length > 1 ? `_Blatt_${sheetIndex + 1}` : ''
+      const baseName = `${safeName(material.name)}_${material.thickness}mm${sheetSuffix}`
+      const svgName = `${baseName}.svg`
+      const dxfName = `${baseName}.dxf`
+      zip.file(
+        svgName,
+        profiled
+          ? createProfiledMaterialSvg(
+              material,
+              sheetPanels,
+              panels,
+              processingProfiles!,
+              processingRecipes,
+              laser!.id,
+              cutPreset,
+              groups,
+              contoursFor,
+              sheetSize,
+            )
+          : createMaterialSvg(
+              material,
+              sheetPanels,
+              panels,
+              layers,
+              groups,
+              laserTexts,
+              sheetSize,
+            ),
       )
+      zip.file(
+        dxfName,
+        profiled
+          ? createProfiledMaterialDxf(
+              material,
+              sheetPanels,
+              panels,
+              processingProfiles!,
+              processingRecipes,
+              laser!.id,
+              cutPreset,
+              contoursFor,
+              sheetSize,
+            )
+          : createMaterialDxf(
+              material,
+              sheetPanels,
+              panels,
+              layers,
+              contoursFor,
+              sheetSize,
+            ),
+      )
+      generatedFiles.push(svgName, dxfName)
+      if (profiled) {
+        const lbrnName = `${baseName}.lbrn2`
+        zip.file(
+          lbrnName,
+          createProfiledMaterialLbrn2(
+            material,
+            sheetPanels,
+            panels,
+            processingProfiles!,
+            processingRecipes,
+            laser!,
+            cutPreset,
+            contoursFor,
+            sheetSize,
+          ),
+        )
+        generatedFiles.push(lbrnName)
+      }
+    }
   }
   const parts = panels
     .filter((panel) => !panel.hidden)
@@ -1478,14 +1677,7 @@ export async function createExportPackage(
                 ),
             )
           : [],
-        files: usedMaterials.flatMap((material) => {
-          const baseName = `${safeName(material.name)}_${material.thickness}mm`
-          return [
-            `${baseName}.svg`,
-            `${baseName}.dxf`,
-            ...(processingProfiles && laser ? [`${baseName}.lbrn2`] : []),
-          ]
-        }),
+        files: generatedFiles,
       },
       null,
       2,

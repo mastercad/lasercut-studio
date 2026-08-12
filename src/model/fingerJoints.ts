@@ -121,12 +121,45 @@ export function fitClearance(
   return custom
 }
 
+/**
+ * Fits an alternating corner-joint pattern to the complete shared edge.
+ *
+ * An odd segment count is essential: with the first segment assigned to the
+ * first panel, it also makes the last segment a finger instead of an open
+ * recess.  Pick the neighbouring odd count whose resulting width is closest
+ * to the requested width, rather than blindly rounding to an even count.
+ */
+export function fittedCornerSegmentCount(
+  overlapLength: number,
+  requestedWidth: number,
+) {
+  if (!Number.isFinite(overlapLength) || overlapLength <= 0) return 0
+  if (!Number.isFinite(requestedWidth) || requestedWidth <= 0) return 0
+  const width = Math.max(2, requestedWidth)
+  const idealCount = overlapLength / width
+  const flooredCount = Math.floor(idealCount)
+  const lowerOdd = Math.max(
+    1,
+    flooredCount % 2 === 0 ? flooredCount - 1 : flooredCount,
+  )
+  const upperOdd = lowerOdd + 2
+  const lowerError = Math.abs(overlapLength / lowerOdd - width)
+  const upperError = Math.abs(overlapLength / upperOdd - width)
+  return upperError < lowerError ? upperOdd : lowerOdd
+}
+
 export function buildFingerJoint(
   first: PanelDefinition,
   second: PanelDefinition,
   options: FingerJointOptions,
   jointId = featureId('joint'),
 ): FingerJointBuild | { error: string } {
+  if (!Number.isFinite(options.fingerWidth) || options.fingerWidth <= 0)
+    return { error: 'Die Fingerbreite muss eine positive Zahl sein.' }
+  if (!Number.isFinite(options.clearance))
+    return { error: 'Das Spiel muss eine gültige Zahl sein.' }
+  if (!Number.isFinite(options.reliefDiameter) || options.reliefDiameter < 0)
+    return { error: 'Der Fräserdurchmesser darf nicht negativ sein.' }
   const firstWorldThin = worldThinAxis(first)
   const secondWorldThin = worldThinAxis(second)
   if (firstWorldThin === secondWorldThin)
@@ -184,10 +217,18 @@ export function buildFingerJoint(
         'Bei einer T-Verbindung muss die erste Auswahl die Platte mit der anstoßenden Kante sein. Bitte Auswahlreihenfolge vertauschen.',
     }
 
-  const count = Math.max(
-    1,
-    Math.round(overlapLength / Math.max(2, options.fingerWidth)),
-  )
+  const count =
+    connectionType === 'corner'
+      ? fittedCornerSegmentCount(overlapLength, options.fingerWidth)
+      : Math.max(
+          1,
+          Math.round(
+            overlapLength /
+              (Number.isFinite(options.fingerWidth)
+                ? Math.max(2, options.fingerWidth)
+                : 2),
+          ),
+        )
   const segment = overlapLength / count
   const clearance = fitClearance(options.fit, options.clearance)
   const firstFeatures: JointFeature[] = []

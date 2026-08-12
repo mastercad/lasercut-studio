@@ -23,7 +23,11 @@ export type ExportWorkerPayload = {
   groups: ExportGroupInfo[]
 }
 export type ExportAnalysis = {
-  jobs: { material: MaterialDefinition; steps: ProjectExportStep[] }[]
+  jobs: {
+    material: MaterialDefinition
+    steps: ProjectExportStep[]
+    sheetCount?: number
+  }[]
   cache: { hits: number; misses: number }
 }
 

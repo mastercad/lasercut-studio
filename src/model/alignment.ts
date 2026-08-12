@@ -1,5 +1,7 @@
 import type { PanelDefinition } from './box'
 import { worldHalfExtents } from './snapping'
+import { Euler, Vector3 } from 'three'
+import { evaluatedPanelLocalBounds } from './panelGeometry'
 
 export type AlignmentGuide = {
   axis: 0 | 1 | 2
@@ -107,16 +109,41 @@ export function calculateDistanceGuides(
   position: [number, number, number],
   others: PanelDefinition[],
   activeAxes: Set<0 | 1 | 2>,
+  geometryPanels: PanelDefinition[] = [moving, ...others],
 ): AlignmentGuide[] {
-  const movingHalf = worldHalfExtents(moving)
+  const worldBounds = (
+    panel: PanelDefinition,
+    panelPosition: [number, number, number],
+  ) => {
+    const local = evaluatedPanelLocalBounds(panel, geometryPanels)
+    const rotation = new Euler(...panel.rotation)
+    const min = [Infinity, Infinity, Infinity]
+    const max = [-Infinity, -Infinity, -Infinity]
+    for (const x of [local.min[0], local.max[0]])
+      for (const y of [local.min[1], local.max[1]])
+        for (const z of [local.min[2], local.max[2]]) {
+          const point = new Vector3(x, y, z)
+            .applyEuler(rotation)
+            .add(new Vector3(...panelPosition))
+          for (const axis of [0, 1, 2] as const) {
+            min[axis] = Math.min(min[axis], point.getComponent(axis))
+            max[axis] = Math.max(max[axis], point.getComponent(axis))
+          }
+        }
+    return {
+      min: min as [number, number, number],
+      max: max as [number, number, number],
+    }
+  }
+  const movingBounds = worldBounds(moving, position)
   const guides: AlignmentGuide[] = []
   const projectionTolerance = 2
   for (const axis of activeAxes) {
     const perpendicular = ([0, 1, 2] as const).filter(
       (candidate) => candidate !== axis,
     )
-    const movingMin = position[axis] - movingHalf[axis]
-    const movingMax = position[axis] + movingHalf[axis]
+    const movingMin = movingBounds.min[axis]
+    const movingMax = movingBounds.max[axis]
     let before: {
       gap: number
       surface: number
@@ -125,22 +152,16 @@ export function calculateDistanceGuides(
     let after: { gap: number; surface: number; other: PanelDefinition } | null =
       null
     for (const other of others) {
-      const otherHalf = worldHalfExtents(other)
+      const otherBounds = worldBounds(other, other.position)
       const overlapsProjection = perpendicular.every((candidate) => {
         const overlap =
-          Math.min(
-            position[candidate] + movingHalf[candidate],
-            other.position[candidate] + otherHalf[candidate],
-          ) -
-          Math.max(
-            position[candidate] - movingHalf[candidate],
-            other.position[candidate] - otherHalf[candidate],
-          )
+          Math.min(movingBounds.max[candidate], otherBounds.max[candidate]) -
+          Math.max(movingBounds.min[candidate], otherBounds.min[candidate])
         return overlap >= -projectionTolerance
       })
       if (!overlapsProjection) continue
-      const otherMin = other.position[axis] - otherHalf[axis]
-      const otherMax = other.position[axis] + otherHalf[axis]
+      const otherMin = otherBounds.min[axis]
+      const otherMax = otherBounds.max[axis]
       if (otherMax <= movingMin + 1e-7) {
         const gap = Math.max(0, movingMin - otherMax)
         if (!before || gap < before.gap)
@@ -160,19 +181,19 @@ export function calculateDistanceGuides(
       movingSurface: number
       other: PanelDefinition
     }[]) {
-      const otherHalf = worldHalfExtents(candidate.other)
+      const otherBounds = worldBounds(candidate.other, candidate.other.position)
       const start: [number, number, number] = [...position]
       const end: [number, number, number] = [...position]
       start[axis] = candidate.movingSurface
       end[axis] = candidate.surface
       for (const crossAxis of perpendicular) {
         const overlapLow = Math.max(
-          position[crossAxis] - movingHalf[crossAxis],
-          candidate.other.position[crossAxis] - otherHalf[crossAxis],
+          movingBounds.min[crossAxis],
+          otherBounds.min[crossAxis],
         )
         const overlapHigh = Math.min(
-          position[crossAxis] + movingHalf[crossAxis],
-          candidate.other.position[crossAxis] + otherHalf[crossAxis],
+          movingBounds.max[crossAxis],
+          otherBounds.max[crossAxis],
         )
         start[crossAxis] = end[crossAxis] = (overlapLow + overlapHigh) / 2
       }

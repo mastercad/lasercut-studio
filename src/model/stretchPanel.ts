@@ -20,20 +20,35 @@ function mappedWorldAxis(panel: PanelDefinition, localAxis: Axis): Axis | null {
   return values[axis] >= 0.98 ? axis : null
 }
 
-function overlapsProjection(
+function overlapsPanelPlane(
   target: PanelDefinition,
   other: PanelDefinition,
-  axis: Axis,
+  normalAxis: Axis,
 ) {
   const targetHalf = worldHalfExtents(target)
   const otherHalf = worldHalfExtents(other)
-  return ([0, 1, 2] as Axis[])
-    .filter((candidate) => candidate !== axis)
-    .every(
-      (candidate) =>
-        Math.abs(target.position[candidate] - other.position[candidate]) <=
-        targetHalf[candidate] + otherHalf[candidate] + 0.1,
-    )
+  return (
+    Math.abs(target.position[normalAxis] - other.position[normalAxis]) <=
+    targetHalf[normalAxis] + otherHalf[normalAxis] + 0.1
+  )
+}
+
+function boundsStretchAxis(
+  target: PanelDefinition,
+  other: PanelDefinition,
+  stretchAxis: Axis,
+  normalAxis: Axis,
+) {
+  if (mappedWorldAxis(other, thinAxis(other)) === stretchAxis) return true
+  const crossAxis = ([0, 1, 2] as Axis[]).find(
+    (axis) => axis !== stretchAxis && axis !== normalAxis,
+  )!
+  const targetHalf = worldHalfExtents(target)[crossAxis]
+  const otherHalf = worldHalfExtents(other)[crossAxis]
+  return (
+    Math.abs(target.position[crossAxis] - other.position[crossAxis]) <
+    targetHalf + otherHalf - 0.1
+  )
 }
 
 export function stretchPanelToNearestNeighbors(
@@ -46,6 +61,8 @@ export function stretchPanelToNearestNeighbors(
     size: [...target.size],
   }
   let stretchedAxes = 0
+  const normalWorldAxis = mappedWorldAxis(target, thinAxis(target))
+  if (normalWorldAxis === null) return null
 
   for (const localAxis of ([0, 1, 2] as Axis[]).filter(
     (axis) => axis !== thinAxis(target),
@@ -62,15 +79,18 @@ export function stretchPanelToNearestNeighbors(
       if (
         other.id === target.id ||
         other.hidden ||
-        !overlapsProjection(result, other, worldAxis)
+        !overlapsPanelPlane(result, other, normalWorldAxis) ||
+        !boundsStretchAxis(result, other, worldAxis, normalWorldAxis)
       )
         continue
       const otherHalf = worldHalfExtents(other)[worldAxis]
-      if (other.position[worldAxis] < result.position[worldAxis]) {
-        const surface = other.position[worldAxis] + otherHalf
+      const otherMin = other.position[worldAxis] - otherHalf
+      const otherMax = other.position[worldAxis] + otherHalf
+      if (otherMax <= result.position[worldAxis] + 0.1) {
+        const surface = otherMax
         if (before === null || surface > before) before = surface
-      } else if (other.position[worldAxis] > result.position[worldAxis]) {
-        const surface = other.position[worldAxis] - otherHalf
+      } else if (otherMin >= result.position[worldAxis] - 0.1) {
+        const surface = otherMin
         if (after === null || surface < after) after = surface
       }
     }

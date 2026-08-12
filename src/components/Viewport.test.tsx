@@ -1,7 +1,7 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PerspectiveCamera, Raycaster, Scene } from 'three'
+import { Euler, PerspectiveCamera, Raycaster, Scene, Vector3 } from 'three'
 import { useEditor } from '../store/editor'
 
 const threeContext = vi.hoisted(() => ({
@@ -170,6 +170,7 @@ import {
   ContourEditorOverlay,
   EditorReliefHole,
   ExtrudedTextContour,
+  InspectionFocusOverlay,
   JointPreviewOverlay,
   PreviewShape,
   SideFaceTarget,
@@ -521,6 +522,38 @@ describe('Viewport editor controls', () => {
     const after = useEditor.getState().panels.find(({ id }) => id === 'front')!
     expect(after.position[0]).not.toBe(before.position[0])
   })
+
+  it('does not move a selected panel when a newly mounted control only receives mouseup', () => {
+    useEditor.getState().selectPanel('front')
+    const before = [
+      ...useEditor.getState().panels.find(({ id }) => id === 'front')!.position,
+    ]
+    render(<Viewport />)
+
+    fireEvent.mouseUp(screen.getByTestId('transform-translate'))
+
+    expect(
+      useEditor.getState().panels.find(({ id }) => id === 'front')?.position,
+    ).toEqual(before)
+  })
+
+  it('does not snap a multi-selection when its control only receives mouseup', () => {
+    useEditor.getState().selectPanels(['front', 'left'])
+    const before = useEditor
+      .getState()
+      .panels.filter(({ id }) => id === 'front' || id === 'left')
+      .map(({ id, position }) => ({ id, position: [...position] }))
+    render(<Viewport />)
+
+    fireEvent.mouseUp(screen.getByTestId('transform-translate'))
+
+    expect(
+      useEditor
+        .getState()
+        .panels.filter(({ id }) => id === 'front' || id === 'left')
+        .map(({ id, position }) => ({ id, position })),
+    ).toEqual(before)
+  })
 })
 
 describe('Viewport 3D overlays', () => {
@@ -702,6 +735,52 @@ describe('Viewport 3D overlays', () => {
     act(() => useEditor.getState().setJointPreview(null))
     expect(view.container.querySelectorAll('mesh')).toHaveLength(0)
     expect(view.container.querySelectorAll('boxGeometry')).toHaveLength(0)
+  })
+
+  it('centres the camera and renders a visible inspection highlight', () => {
+    const panel = useEditor.getState().panels.find(({ id }) => id === 'front')!
+    const previousCameraPosition = threeContext.camera!.position.clone()
+    const previousCameraQuaternion = threeContext.camera!.quaternion.clone()
+    act(() =>
+      useEditor.getState().setInspectionFocus({
+        requestId: 1,
+        sourceId: 'cut',
+        panelId: panel.id,
+        center: [10, 20, 0],
+        size: [5, 12, 3],
+      }),
+    )
+    const view = render(<InspectionFocusOverlay />)
+    expect(view.container.querySelector('boxGeometry')).toHaveAttribute(
+      'args',
+      '5,12,3',
+    )
+    const worldCenter = new Vector3(10, 20, 0)
+      .applyEuler(new Euler(...panel.rotation))
+      .add(new Vector3(...panel.position))
+    const cameraDirection = new Vector3()
+    threeContext.camera!.getWorldDirection(cameraDirection)
+    const expectedDirection = worldCenter
+      .clone()
+      .sub(threeContext.camera!.position)
+      .normalize()
+    expect(cameraDirection.distanceTo(expectedDirection)).toBeLessThan(1e-7)
+
+    const userCameraPosition = new Vector3(120, 80, 300)
+    threeContext.camera!.position.copy(userCameraPosition)
+    threeContext.camera!.lookAt(0, 0, 0)
+    act(() =>
+      useEditor.setState((state) => ({
+        panels: state.panels.map((candidate) => ({ ...candidate })),
+      })),
+    )
+    expect(threeContext.camera!.position).toEqual(userCameraPosition)
+
+    act(() => useEditor.getState().setInspectionFocus(null))
+    expect(threeContext.camera!.position).toEqual(previousCameraPosition)
+    expect(
+      threeContext.camera!.quaternion.angleTo(previousCameraQuaternion),
+    ).toBeLessThan(1e-12)
   })
 
   it('renders and switches complete face and edge contour selection overlays', () => {

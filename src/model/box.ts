@@ -33,6 +33,10 @@ export type SocketPattern = {
   span: number
   slotLength: number
   slotWidth: number
+  /** Material thickness this socket was designed for, excluding clearance. */
+  targetThickness?: number
+  /** Deliberate total clearance already included in slotWidth. */
+  clearance?: number
   socketType?: 'through' | 'cross'
   entrySide?: 'negative' | 'positive'
   depthRatio?: number
@@ -119,6 +123,10 @@ export type MaterialDefinition = {
   thickness: number
   kerf: number
   color: string
+  /** User-defined minimum material behind an edge-entering slot row. */
+  minimumBackbone?: number
+  /** User-defined minimum material between neighbouring slots. */
+  minimumWeb?: number
 }
 export type JointFeature = {
   id: string

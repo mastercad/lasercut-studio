@@ -60,17 +60,20 @@ function SidebarAccordion({
   title,
   className = '',
   defaultOpen = true,
+  onOpenChange,
   children,
 }: {
   id: string
   title: ReactNode
   className?: string
   defaultOpen?: boolean
+  onOpenChange?: (open: boolean) => void
   children: ReactNode
 }) {
   const [open, setOpen] = useState(() => savedAccordionState(id, defaultOpen))
   const update = (next: boolean) => {
     setOpen(next)
+    onOpenChange?.(next)
     if (typeof localStorage === 'undefined') return
     try {
       const saved = JSON.parse(
@@ -260,7 +263,9 @@ export function Properties() {
   const [connectionType, setConnectionType] = useState<
     'finger' | 'tab-slot' | 'cross'
   >('finger')
-  const [connectionBuilderOpen, setConnectionBuilderOpen] = useState(false)
+  const [connectionBuilderOpen, setConnectionBuilderOpen] = useState(() =>
+    savedAccordionState('connection-builder', true),
+  )
   const [crossRatio, setCrossRatio] = useState(50)
   const [crossFirstFromHigh, setCrossFirstFromHigh] = useState(true)
   const [booleanOperation, setBooleanOperation] =
@@ -275,6 +280,8 @@ export function Properties() {
   const [materialThickness, setMaterialThickness] = useState(3)
   const [materialKerf, setMaterialKerf] = useState(0.15)
   const [materialColor, setMaterialColor] = useState('#d9a96c')
+  const [materialMinimumBackbone, setMaterialMinimumBackbone] = useState(0)
+  const [materialMinimumWeb, setMaterialMinimumWeb] = useState(0)
   const [systemFonts, setSystemFonts] = useState<string[]>([])
   const [contourX, setContourX] = useState(1)
   const [contourY, setContourY] = useState(0)
@@ -331,6 +338,8 @@ export function Properties() {
   )
   const rotationPreview = useEditor((state) => state.rotationPreview)
   const setJointPreview = useEditor((state) => state.setJointPreview)
+  const inspectionFocus = useEditor((state) => state.inspectionFocus)
+  const setInspectionFocus = useEditor((state) => state.setInspectionFocus)
   const updateCut = useEditor((state) => state.updateCut)
   const removeCut = useEditor((state) => state.removeCut)
   const processingProfiles = useEditor((state) => state.processingProfiles)
@@ -345,6 +354,71 @@ export function Properties() {
     selected.length === 1
       ? panels.find((panel) => panel.id === selected[0])
       : undefined
+  const focusRegion = (
+    sourceId: string,
+    regions: {
+      center: [number, number, number]
+      size: [number, number, number]
+    }[],
+    clipToPanel: boolean | readonly (0 | 1 | 2)[] = false,
+  ) => {
+    if (!selectedPanel || !regions.length) return
+    if (inspectionFocus?.sourceId === sourceId) {
+      setInspectionFocus(null)
+      return
+    }
+    const min = [Infinity, Infinity, Infinity]
+    const max = [-Infinity, -Infinity, -Infinity]
+    const clippedAxes = Array.isArray(clipToPanel)
+      ? new Set<0 | 1 | 2>(clipToPanel)
+      : null
+    for (const region of regions)
+      for (const axis of [0, 1, 2] as const) {
+        const regionMin = region.center[axis] - region.size[axis] / 2
+        const regionMax = region.center[axis] + region.size[axis] / 2
+        const clipAxis = clipToPanel === true || clippedAxes?.has(axis)
+        min[axis] = Math.min(
+          min[axis],
+          clipAxis
+            ? Math.max(regionMin, -selectedPanel.size[axis] / 2)
+            : regionMin,
+        )
+        max[axis] = Math.max(
+          max[axis],
+          clipAxis
+            ? Math.min(regionMax, selectedPanel.size[axis] / 2)
+            : regionMax,
+        )
+      }
+    setInspectionFocus({
+      requestId: Date.now(),
+      sourceId,
+      panelId: selectedPanel.id,
+      center: min.map((value, axis) => (value + max[axis]) / 2) as [
+        number,
+        number,
+        number,
+      ],
+      size: min.map((value, axis) => Math.max(0.2, max[axis] - value)) as [
+        number,
+        number,
+        number,
+      ],
+    })
+  }
+  const focusJoint = (jointId: string) => {
+    if (!selectedPanel) return
+    focusRegion(
+      jointId,
+      [
+        ...selectedPanel.cuts.filter((cut) => cut.jointId === jointId),
+        ...selectedPanel.jointFeatures.filter(
+          (feature) => feature.jointId === jointId,
+        ),
+      ],
+      [thinAxis(selectedPanel)],
+    )
+  }
   const selectedTextShape: Extract<PanelShape, { type: 'text' }> | undefined =
     selectedPanel?.shape?.type === 'text'
       ? selectedPanel.shape
@@ -407,8 +481,6 @@ export function Properties() {
     booleanTarget && booleanTool
       ? analyzeConnection(booleanTarget, booleanTool)
       : undefined
-  const connectionPairKey =
-    selected.length === 2 ? [...selected].sort().join('|') : ''
   const displayedRotation =
     selectedPanel && rotationPreview?.panelId === selectedPanel.id
       ? rotationPreview.rotation
@@ -628,8 +700,6 @@ export function Properties() {
     setJointPreview,
   ])
 
-  useEffect(() => setConnectionBuilderOpen(false), [connectionPairKey])
-
   useEffect(() => () => setJointPreview(null), [setJointPreview])
 
   useEffect(() => {
@@ -641,6 +711,8 @@ export function Properties() {
     setMaterialThickness(material.thickness)
     setMaterialKerf(material.kerf)
     setMaterialColor(material.color)
+    setMaterialMinimumBackbone(material.minimumBackbone ?? 0)
+    setMaterialMinimumWeb(material.minimumWeb ?? 0)
   }, [materialEditorId])
 
   useEffect(() => {
@@ -965,6 +1037,38 @@ export function Properties() {
               onChange={(event) => setSelectionColor(event.target.value)}
             />
           </label>
+          <label className="number-field">
+            <span>Mindestrücken hinter Steckschlitzen</span>
+            <div>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={materialMinimumBackbone}
+                onChange={(event) =>
+                  setMaterialMinimumBackbone(
+                    Math.max(0, Number(event.target.value)),
+                  )
+                }
+              />
+              <em>mm</em>
+            </div>
+          </label>
+          <label className="number-field">
+            <span>Mindeststeg zwischen Steckschlitzen</span>
+            <div>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={materialMinimumWeb}
+                onChange={(event) =>
+                  setMaterialMinimumWeb(Math.max(0, Number(event.target.value)))
+                }
+              />
+              <em>mm</em>
+            </div>
+          </label>
           {usedDisplayColors.length > 0 && (
             <div className="used-color-palette">
               <span>Bereits verwendet</span>
@@ -997,13 +1101,13 @@ export function Properties() {
         <SidebarAccordion
           key="boolean"
           id="boolean"
-          title="Formen kombinieren"
+          title="Vereinen & Ausschneiden"
           className="boolean-builder"
         >
           <div className="boolean-operands">
             <div>
               <small>Zielkörper</small>
-              <strong>{booleanTarget.label}</strong>
+              <strong title={booleanTarget.label}>{booleanTarget.label}</strong>
             </div>
             <button
               title="Ziel und Werkzeug vertauschen"
@@ -1013,7 +1117,7 @@ export function Properties() {
             </button>
             <div>
               <small>Werkzeug</small>
-              <strong>{booleanTool.label}</strong>
+              <strong title={booleanTool.label}>{booleanTool.label}</strong>
             </div>
           </div>
           <label className="boolean-operation">
@@ -1043,246 +1147,224 @@ export function Properties() {
         <SidebarAccordion
           key="connection-builder"
           id="connection-builder"
-          title="Verbindung erstellen"
+          title="Teile verbinden"
           className="finger-joint-builder connection-builder"
+          onOpenChange={setConnectionBuilderOpen}
         >
-          <button
-            className={`connection-builder-toggle${connectionBuilderOpen ? ' active' : ''}`}
-            onClick={() => setConnectionBuilderOpen((open) => !open)}
-          >
-            <span>Verbindung</span>
-            <strong>
-              {connectionBuilderOpen
-                ? 'Vorschau ausblenden'
-                : 'Öffnen & Vorschau anzeigen'}
-            </strong>
-          </button>
-          {connectionBuilderOpen && (
-            <>
-              <div className="joint-order">
-                <div>
-                  <small>
-                    {connectionType === 'cross'
-                      ? `1 · Schlitz von ${crossFirstFromHigh ? 'oben' : 'unten'}`
-                      : connectionType === 'tab-slot'
-                        ? '1 · Anstoßendes Teil'
-                        : '1 · Finger beginnen'}
-                  </small>
-                  <strong>{booleanTarget.label}</strong>
-                </div>
-                <button
-                  title={
-                    connectionType === 'cross'
-                      ? 'Öffnungsrichtung wechseln'
-                      : 'Reihenfolge vertauschen'
-                  }
-                  onClick={() =>
-                    connectionType === 'cross'
-                      ? setCrossFirstFromHigh((value) => !value)
-                      : swapSelectionOrder()
-                  }
-                >
-                  <ArrowDownUp />
-                </button>
-                <div>
-                  <small>
-                    {connectionType === 'cross'
-                      ? `2 · Schlitz von ${crossFirstFromHigh ? 'unten' : 'oben'}`
-                      : connectionType === 'tab-slot'
-                        ? '2 · Durchlaufendes Teil'
-                        : '2 · Gegenfinger'}
-                  </small>
-                  <strong>{booleanTool.label}</strong>
-                </div>
-              </div>
-              <label className="select-field">
-                <span>Verbindungsart</span>
-                <select
-                  value={connectionType}
+          <p className="connection-builder-intro">
+            Wähle die Verbindungsart und prüfe die Vorschau direkt am Modell.
+          </p>
+          <div className="joint-order">
+            <div>
+              <small>
+                {connectionType === 'cross'
+                  ? `1 · Schlitz von ${crossFirstFromHigh ? 'oben' : 'unten'}`
+                  : connectionType === 'tab-slot'
+                    ? '1 · Anstoßendes Teil'
+                    : '1 · Finger beginnen'}
+              </small>
+              <strong title={booleanTarget.label}>{booleanTarget.label}</strong>
+            </div>
+            <button
+              title={
+                connectionType === 'cross'
+                  ? 'Öffnungsrichtung wechseln'
+                  : 'Reihenfolge vertauschen'
+              }
+              onClick={() =>
+                connectionType === 'cross'
+                  ? setCrossFirstFromHigh((value) => !value)
+                  : swapSelectionOrder()
+              }
+            >
+              <ArrowDownUp />
+            </button>
+            <div>
+              <small>
+                {connectionType === 'cross'
+                  ? `2 · Schlitz von ${crossFirstFromHigh ? 'unten' : 'oben'}`
+                  : connectionType === 'tab-slot'
+                    ? '2 · Durchlaufendes Teil'
+                    : '2 · Gegenfinger'}
+              </small>
+              <strong title={booleanTool.label}>{booleanTool.label}</strong>
+            </div>
+          </div>
+          <label className="select-field">
+            <span>Verbindungsart</span>
+            <select
+              value={connectionType}
+              onChange={(event) =>
+                setConnectionType(event.target.value as typeof connectionType)
+              }
+            >
+              <option
+                value="finger"
+                disabled={!connectionAnalysis.possible.finger}
+              >
+                Fingerzinken
+              </option>
+              <option
+                value="tab-slot"
+                disabled={!connectionAnalysis.possible.tabSlot}
+              >
+                Zapfen &amp; Schlitz
+              </option>
+              <option
+                value="cross"
+                disabled={!connectionAnalysis.possible.cross}
+              >
+                Steckkreuz
+              </option>
+            </select>
+          </label>
+          <small className="connection-analysis">
+            {connectionAnalysis.message}
+          </small>
+          {connectionType !== 'cross' && (
+            <label className="number-field">
+              <span>
+                {connectionType === 'finger' ? 'Fingerbreite' : 'Zapfenbreite'}
+              </span>
+              <div>
+                <input
+                  type="number"
+                  min="2"
+                  step="1"
+                  value={fingerWidth}
                   onChange={(event) =>
-                    setConnectionType(
-                      event.target.value as typeof connectionType,
+                    setFingerWidth(Math.max(2, Number(event.target.value)))
+                  }
+                />
+                <em>mm</em>
+              </div>
+            </label>
+          )}
+          {connectionType === 'cross' && (
+            <label className="number-field">
+              <span>Schlitztiefe Teil 1</span>
+              <div>
+                <input
+                  type="number"
+                  min="10"
+                  max="90"
+                  step="5"
+                  value={crossRatio}
+                  onChange={(event) =>
+                    setCrossRatio(
+                      Math.min(90, Math.max(10, Number(event.target.value))),
                     )
                   }
-                >
-                  <option
-                    value="finger"
-                    disabled={!connectionAnalysis.possible.finger}
-                  >
-                    Fingerzinken
-                  </option>
-                  <option
-                    value="tab-slot"
-                    disabled={!connectionAnalysis.possible.tabSlot}
-                  >
-                    Zapfen &amp; Schlitz
-                  </option>
-                  <option
-                    value="cross"
-                    disabled={!connectionAnalysis.possible.cross}
-                  >
-                    Steckkreuz
-                  </option>
-                </select>
-              </label>
-              <small className="connection-analysis">
-                {connectionAnalysis.message}
-              </small>
-              {connectionType !== 'cross' && (
-                <label className="number-field">
-                  <span>
-                    {connectionType === 'finger'
-                      ? 'Fingerbreite'
-                      : 'Zapfenbreite'}
-                  </span>
-                  <div>
-                    <input
-                      type="number"
-                      min="2"
-                      step="1"
-                      value={fingerWidth}
-                      onChange={(event) =>
-                        setFingerWidth(Math.max(2, Number(event.target.value)))
-                      }
-                    />
-                    <em>mm</em>
-                  </div>
-                </label>
-              )}
-              {connectionType === 'cross' && (
-                <label className="number-field">
-                  <span>Schlitztiefe Teil 1</span>
-                  <div>
-                    <input
-                      type="number"
-                      min="10"
-                      max="90"
-                      step="5"
-                      value={crossRatio}
-                      onChange={(event) =>
-                        setCrossRatio(
-                          Math.min(
-                            90,
-                            Math.max(10, Number(event.target.value)),
-                          ),
-                        )
-                      }
-                    />
-                    <em>%</em>
-                  </div>
-                </label>
-              )}
-              {connectionType === 'cross' && (
-                <small className="boolean-help">
-                  Teil 1: {crossRatio}% von{' '}
-                  {crossFirstFromHigh ? 'oben' : 'unten'} · Teil 2:{' '}
-                  {100 - crossRatio}% von{' '}
-                  {crossFirstFromHigh ? 'unten' : 'oben'}.
-                </small>
-              )}
-              {connectionType === 'cross' && (
-                <small className="connection-preview-legend">
-                  <i className="first" /> Teil 1 · Schlitz von{' '}
-                  {crossFirstFromHigh ? 'oben' : 'unten'}{' '}
-                  <i className="second" /> Teil 2 · Schlitz von{' '}
-                  {crossFirstFromHigh ? 'unten' : 'oben'}
-                </small>
-              )}
-              <label className="select-field">
-                <span>Passung</span>
-                <select
-                  value={fitPreset}
+                />
+                <em>%</em>
+              </div>
+            </label>
+          )}
+          {connectionType === 'cross' && (
+            <small className="boolean-help">
+              Teil 1: {crossRatio}% von {crossFirstFromHigh ? 'oben' : 'unten'}{' '}
+              · Teil 2: {100 - crossRatio}% von{' '}
+              {crossFirstFromHigh ? 'unten' : 'oben'}.
+            </small>
+          )}
+          {connectionType === 'cross' && (
+            <small className="connection-preview-legend">
+              <i className="first" /> Teil 1 · Schlitz von{' '}
+              {crossFirstFromHigh ? 'oben' : 'unten'} <i className="second" />{' '}
+              Teil 2 · Schlitz von {crossFirstFromHigh ? 'unten' : 'oben'}
+            </small>
+          )}
+          <label className="select-field">
+            <span>Passung</span>
+            <select
+              value={fitPreset}
+              onChange={(event) =>
+                setFitPreset(event.target.value as FitPreset)
+              }
+            >
+              <option value="press">Press · −0,12 mm</option>
+              <option value="tight">Eng · 0,00 mm</option>
+              <option value="loose">Locker · +0,20 mm</option>
+              <option value="custom">Benutzerdefiniert</option>
+            </select>
+          </label>
+          {fitPreset === 'custom' && (
+            <label className="number-field">
+              <span>Spiel</span>
+              <div>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={customClearance}
                   onChange={(event) =>
-                    setFitPreset(event.target.value as FitPreset)
+                    setCustomClearance(Number(event.target.value))
                   }
-                >
-                  <option value="press">Press · −0,12 mm</option>
-                  <option value="tight">Eng · 0,00 mm</option>
-                  <option value="loose">Locker · +0,20 mm</option>
-                  <option value="custom">Benutzerdefiniert</option>
-                </select>
-              </label>
-              {fitPreset === 'custom' && (
-                <label className="number-field">
-                  <span>Spiel</span>
-                  <div>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={customClearance}
-                      onChange={(event) =>
-                        setCustomClearance(Number(event.target.value))
-                      }
-                    />
-                    <em>mm</em>
-                  </div>
-                </label>
-              )}
-              {connectionType !== 'cross' && (
-                <label className="select-field">
-                  <span>Ecken</span>
-                  <select
-                    value={fingerStyle}
-                    onChange={(event) =>
-                      setFingerStyle(event.target.value as FingerStyle)
-                    }
-                  >
-                    <option value="straight">Gerade</option>
-                    <option value="dogbone">Dogbone · Eckbohrungen</option>
-                    <option value="t-bone">T-Bone · mittige Entlastung</option>
-                  </select>
-                </label>
-              )}
-              {connectionType !== 'cross' && fingerStyle !== 'straight' && (
-                <label className="number-field">
-                  <span>Bohrungs-Ø</span>
-                  <div>
-                    <input
-                      type="number"
-                      min="0.2"
-                      step="0.1"
-                      value={reliefDiameter}
-                      onChange={(event) =>
-                        setReliefDiameter(
-                          Math.max(0.2, Number(event.target.value)),
-                        )
-                      }
-                    />
-                    <em>mm</em>
-                  </div>
-                </label>
-              )}
-              <button
-                className="apply-joint"
-                onClick={() =>
-                  connectionType === 'cross'
-                    ? createCrossJoint({
-                        ratio: crossRatio / 100,
-                        fit: fitPreset,
-                        clearance: customClearance,
-                        firstFromHigh: crossFirstFromHigh,
-                      })
-                    : createFingerJoint({
-                        connectionType,
-                        fingerWidth,
-                        fit: fitPreset,
-                        clearance: customClearance,
-                        style: fingerStyle,
-                        reliefDiameter,
-                      })
+                />
+                <em>mm</em>
+              </div>
+            </label>
+          )}
+          {connectionType !== 'cross' && (
+            <label className="select-field">
+              <span>Ecken</span>
+              <select
+                value={fingerStyle}
+                onChange={(event) =>
+                  setFingerStyle(event.target.value as FingerStyle)
                 }
               >
-                Verbindung erzeugen
-              </button>
-              {selectedJointCount > 0 && (
-                <button
-                  className="remove-selected-joints"
-                  onClick={removeFingerJointsFromSelection}
-                >
-                  Finger zwischen Auswahl entfernen · {selectedJointCount}
-                </button>
-              )}
-            </>
+                <option value="straight">Gerade</option>
+                <option value="dogbone">Dogbone · Eckbohrungen</option>
+                <option value="t-bone">T-Bone · mittige Entlastung</option>
+              </select>
+            </label>
+          )}
+          {connectionType !== 'cross' && fingerStyle !== 'straight' && (
+            <label className="number-field">
+              <span>Bohrungs-Ø</span>
+              <div>
+                <input
+                  type="number"
+                  min="0.2"
+                  step="0.1"
+                  value={reliefDiameter}
+                  onChange={(event) =>
+                    setReliefDiameter(Math.max(0.2, Number(event.target.value)))
+                  }
+                />
+                <em>mm</em>
+              </div>
+            </label>
+          )}
+          <button
+            className="apply-joint"
+            onClick={() =>
+              connectionType === 'cross'
+                ? createCrossJoint({
+                    ratio: crossRatio / 100,
+                    fit: fitPreset,
+                    clearance: customClearance,
+                    firstFromHigh: crossFirstFromHigh,
+                  })
+                : createFingerJoint({
+                    connectionType,
+                    fingerWidth,
+                    fit: fitPreset,
+                    clearance: customClearance,
+                    style: fingerStyle,
+                    reliefDiameter,
+                  })
+            }
+          >
+            Verbindung jetzt erstellen
+          </button>
+          {selectedJointCount > 0 && (
+            <button
+              className="remove-selected-joints"
+              onClick={removeFingerJointsFromSelection}
+            >
+              Finger zwischen Auswahl entfernen · {selectedJointCount}
+            </button>
           )}
         </SidebarAccordion>
       )}
@@ -1290,12 +1372,14 @@ export function Properties() {
         <SidebarAccordion
           key="selection-transform"
           id="selection-transform"
-          title="Nur ausgewählte Teile"
+          title="Position & Größe"
           className="selection-transform"
         >
           {selectedCenter && (
             <>
-              <h4 className="shape-parameter-title">Gemeinsame Position</h4>
+              <h4 className="shape-parameter-title">
+                Auswahl gemeinsam verschieben
+              </h4>
               {(['X', 'Y', 'Z'] as const).map((axis, index) => (
                 <label
                   className="number-field"
@@ -1630,8 +1714,17 @@ export function Properties() {
               (instance) => instance.id === cut.socketInstanceId,
             )
             return (
-              <details key={cut.id} open={selectedPanel.cuts.length === 1}>
-                <summary>
+              <details
+                key={cut.id}
+                open={selectedPanel.cuts.length === 1}
+                className={
+                  inspectionFocus?.sourceId === cut.id ? 'focused-entry' : ''
+                }
+              >
+                <summary
+                  title="Aussparung im Modell anzeigen"
+                  onClick={() => focusRegion(cut.id, [cut], true)}
+                >
                   <span>
                     {socketPattern?.socketType === 'cross'
                       ? 'Kreuzsteckaufnahme'
@@ -1645,6 +1738,7 @@ export function Properties() {
                   <button
                     onClick={(event) => {
                       event.preventDefault()
+                      event.stopPropagation()
                       if (socketPattern && socketInstance)
                         updateSocketInstance(
                           socketPattern.id,
@@ -1852,7 +1946,18 @@ export function Properties() {
                     : joint.firstPanelId
                 const other = panels.find((panel) => panel.id === otherId)
                 return (
-                  <div className="joint-card" key={joint.id}>
+                  <div
+                    className={`joint-card${inspectionFocus?.sourceId === joint.id ? ' focused-entry' : ''}`}
+                    key={joint.id}
+                    role="button"
+                    tabIndex={0}
+                    title="Verbindung im Modell anzeigen"
+                    onClick={() => focusJoint(joint.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ')
+                        focusJoint(joint.id)
+                    }}
+                  >
                     <div>
                       <strong>
                         {joint.connectionType === 'corner'
@@ -1864,7 +1969,12 @@ export function Properties() {
                         {joint.fit}
                       </small>
                     </div>
-                    <button onClick={() => removeFingerJoint(joint.id)}>
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        removeFingerJoint(joint.id)
+                      }}
+                    >
                       Entfernen
                     </button>
                   </div>
@@ -1883,7 +1993,18 @@ export function Properties() {
                     : joint.firstPanelId
                 const other = panels.find((panel) => panel.id === otherId)
                 return (
-                  <div className="joint-card" key={joint.id}>
+                  <div
+                    className={`joint-card${inspectionFocus?.sourceId === joint.id ? ' focused-entry' : ''}`}
+                    key={joint.id}
+                    role="button"
+                    tabIndex={0}
+                    title="Verbindung im Modell anzeigen"
+                    onClick={() => focusJoint(joint.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ')
+                        focusJoint(joint.id)
+                    }}
+                  >
                     <div>
                       <strong>Steckkreuz</strong>
                       <small>
@@ -1891,7 +2012,12 @@ export function Properties() {
                         {Math.round((1 - joint.ratio) * 100)} · {joint.fit}
                       </small>
                     </div>
-                    <button onClick={() => removeCrossJoint(joint.id)}>
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        removeCrossJoint(joint.id)
+                      }}
+                    >
                       Entfernen
                     </button>
                   </div>
@@ -1979,6 +2105,7 @@ export function Properties() {
         id="material"
         title="Material"
         className="material-editor"
+        defaultOpen={false}
       >
         <>
           <label className="select-field">
@@ -2077,6 +2204,8 @@ export function Properties() {
                   thickness: materialThickness,
                   kerf: materialKerf,
                   color: materialColor,
+                  minimumBackbone: materialMinimumBackbone || undefined,
+                  minimumWeb: materialMinimumWeb || undefined,
                 })
               }
             >
@@ -2089,6 +2218,8 @@ export function Properties() {
                   thickness: materialThickness,
                   kerf: materialKerf,
                   color: materialColor,
+                  minimumBackbone: materialMinimumBackbone || undefined,
+                  minimumWeb: materialMinimumWeb || undefined,
                 })
               }
             >

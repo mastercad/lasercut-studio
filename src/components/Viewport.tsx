@@ -48,12 +48,14 @@ import { linkedBooleanToolIds } from '../model/booleanGraph'
 import {
   snapPanelCoplanarPosition,
   snapPanelPosition,
+  snapPanelWithManualCuts,
   surfaceSnapDistance,
   worldHalfExtents,
 } from '../model/snapping'
 import { thinAxis, type JointFeature, type PanelDefinition } from '../model/box'
 import { shapeToFreeContour, textOutlineShapes } from '../model/contours'
 import { createSystemTextOutline } from '../model/fonts'
+import { contourFaceMove, contourSnapDistance } from '../model/contourSnapping'
 
 // TransformControls can finish by rebuilding connected geometry underneath
 // the pointer. The browser then emits the click belonging to that same drag
@@ -182,7 +184,15 @@ function ExtrudedTextContour({
   )
 }
 
-function ContourEditorOverlay({ panel }: { panel: PanelDefinition }) {
+function ContourEditorOverlay({
+  panel,
+  allPanels = [],
+  onGuidesChange = () => {},
+}: {
+  panel: PanelDefinition
+  allPanels?: PanelDefinition[]
+  onGuidesChange?: (guides: AlignmentGuide[]) => void
+}) {
   const handleRef = useRef<Group>(null!)
   const lastHandlePosition = useRef<[number, number, number] | null>(null)
   const lastSelectionKey = useRef('')
@@ -193,6 +203,7 @@ function ContourEditorOverlay({ panel }: { panel: PanelDefinition }) {
   const moveSelectedContour = useEditor((state) => state.moveSelectedContour)
   const beginTransform = useEditor((state) => state.beginTransform)
   const endTransform = useEditor((state) => state.endTransform)
+  const snapEnabled = useEditor((state) => state.snapEnabled)
   const draggingHandle = useRef(false)
   useEffect(
     () => () => {
@@ -259,12 +270,41 @@ function ContourEditorOverlay({ panel }: { panel: PanelDefinition }) {
       current[1] - previous[1],
       current[2] - previous[2],
     ).applyQuaternion(new Quaternion().setFromEuler(panelRotation).invert())
-    const delta: [number, number] = [
+    let delta: [number, number] = [
       localDelta.getComponent(axes[0]),
       localDelta.getComponent(axes[1]),
     ]
     if (delta.some((value) => Math.abs(value) > 1e-8)) {
-      lastHandlePosition.current = current
+      if (selection && selectedPoint) {
+        const localAxis = (Math.abs(delta[0]) >= Math.abs(delta[1]) ? 0 : 1) as
+          0 | 1
+        const result = contourFaceMove(
+          panel,
+          [selectedPoint, selectedNext ?? selectedPoint],
+          delta,
+          localAxis,
+          allPanels.filter((candidate) => candidate.id !== panel.id),
+          contourSnapDistance,
+          snapEnabled,
+        )
+        delta = result.delta
+        onGuidesChange(result.guides)
+        const correctedWorld = new Vector3()
+          .setComponent(axes[0], delta[0])
+          .setComponent(axes[1], delta[1])
+          .applyEuler(panelRotation)
+          .add(new Vector3(...previous))
+        handleRef.current.position.set(
+          correctedWorld.x,
+          correctedWorld.y,
+          correctedWorld.z,
+        )
+        lastHandlePosition.current = correctedWorld.toArray() as [
+          number,
+          number,
+          number,
+        ]
+      } else lastHandlePosition.current = current
       moveSelectedContour(delta)
     }
   }
@@ -354,10 +394,13 @@ function ContourEditorOverlay({ panel }: { panel: PanelDefinition }) {
             showZ={axes.includes(2)}
             onMouseDown={() => {
               draggingHandle.current = true
+              onGuidesChange([])
               beginTransform()
             }}
             onMouseUp={() => {
+              if (!draggingHandle.current) return
               draggingHandle.current = false
+              onGuidesChange([])
               endTransform()
             }}
             onObjectChange={applyHandleMove}
@@ -518,6 +561,7 @@ function EditablePanel({
   )
   const cancelTextEdit = useRef(false)
   const dragOrigin = useRef<[number, number, number] | null>(null)
+  const transformDragActive = useRef(false)
   const guideFrame = useRef<number | null>(null)
   const isOnlySelected =
     !selectedGroupId &&
@@ -588,6 +632,7 @@ function EditablePanel({
         desired,
         candidates,
         activeAxes,
+        allPanels,
       )
       if (!snapEnabled) {
         onGuidesChange(distanceGuides)
@@ -596,7 +641,7 @@ function EditablePanel({
       const snapDistance = surfaceSnapDistance(panel)
       const snapped = coplanarModifier
         ? snapPanelCoplanarPosition(panel, desired, candidates, snapDistance)
-        : snapPanelPosition(panel, desired, candidates, snapDistance)
+        : snapPanelWithManualCuts(panel, desired, candidates, snapDistance)
       onGuidesChange([
         ...calculateAlignmentGuides(
           panel,
@@ -655,7 +700,7 @@ function EditablePanel({
       const snapped = snapEnabled
         ? coplanarModifier
           ? snapPanelCoplanarPosition(panel, desired, candidates)
-          : snapPanelPosition(panel, desired, candidates)
+          : snapPanelWithManualCuts(panel, desired, candidates)
         : desired
       mesh.position.set(...snapped)
       movePanel(panel.id, snapped)
@@ -793,6 +838,7 @@ function EditablePanel({
           rotationSnap={snapModifier ? (rotationStep * Math.PI) / 180 : null}
           scaleSnap={snapModifier ? scaleStep : null}
           onMouseDown={() => {
+            transformDragActive.current = true
             beginSceneSelectionSuppression()
             beginTransform()
             dragOrigin.current = meshRef.current.position.toArray() as [
@@ -804,6 +850,8 @@ function EditablePanel({
             onGuidesChange([])
           }}
           onMouseUp={() => {
+            if (!transformDragActive.current) return
+            transformDragActive.current = false
             if (guideFrame.current !== null)
               cancelAnimationFrame(guideFrame.current)
             guideFrame.current = null
@@ -882,6 +930,7 @@ function BoxModel({
   const snapEnabled = useEditor((state) => state.snapEnabled)
   const groupRef = useRef<Group>(null!)
   const groupDragOrigin = useRef<[number, number, number] | null>(null)
+  const groupTransformDragActive = useRef(false)
   const groupGuideFrame = useRef<number | null>(null)
   const transformSelectionActive =
     Boolean(selectedGroupId) || selectedPanels.length > 1
@@ -1020,7 +1069,13 @@ function BoxModel({
           const panel = panels.find(
             (candidate) => candidate.id === selectedPanels[0],
           )
-          return panel ? <ContourEditorOverlay panel={panel} /> : null
+          return panel ? (
+            <ContourEditorOverlay
+              panel={panel}
+              allPanels={panels}
+              onGuidesChange={onGuidesChange}
+            />
+          ) : null
         })()}
       {transformSelectionActive && (
         <group ref={groupRef} position={center}>
@@ -1058,6 +1113,7 @@ function BoxModel({
           rotationSnap={snapModifier ? (rotationStep * Math.PI) / 180 : null}
           scaleSnap={snapModifier ? scaleStep : null}
           onMouseDown={() => {
+            groupTransformDragActive.current = true
             beginSceneSelectionSuppression()
             beginTransform()
             groupDragOrigin.current = groupRef.current.position.toArray() as [
@@ -1086,6 +1142,8 @@ function BoxModel({
             scheduleGroupGuides(object)
           }}
           onMouseUp={() => {
+            if (!groupTransformDragActive.current) return
+            groupTransformDragActive.current = false
             if (groupGuideFrame.current !== null)
               cancelAnimationFrame(groupGuideFrame.current)
             groupGuideFrame.current = null
@@ -1147,6 +1205,95 @@ function SelectionBridgeProvider({
     }
   }, [bridge, camera, gl, raycaster, scene])
   return null
+}
+
+function InspectionCameraFocus({
+  focus,
+  panel,
+}: {
+  focus: NonNullable<ReturnType<typeof useEditor.getState>['inspectionFocus']>
+  panel: PanelDefinition
+}) {
+  const { camera, controls, invalidate } = useThree()
+  const request = useRef({ focus, panel }).current
+  const scene = useRef({ camera, controls, invalidate }).current
+
+  useEffect(() => {
+    const previousPosition = scene.camera.position.clone()
+    const previousQuaternion = scene.camera.quaternion.clone()
+    const candidateControls = scene.controls as unknown
+    const orbit =
+      candidateControls &&
+      typeof candidateControls === 'object' &&
+      'target' in candidateControls &&
+      'update' in candidateControls
+        ? (candidateControls as { target: Vector3; update: () => void })
+        : undefined
+    const previousTarget = orbit?.target.clone()
+    const center = new Vector3(...request.focus.center)
+      .applyEuler(new Euler(...request.panel.rotation))
+      .add(new Vector3(...request.panel.position))
+    const direction = scene.camera.position
+      .clone()
+      .sub(orbit?.target ?? center)
+      .normalize()
+    if (direction.lengthSq() < 1e-7) direction.set(0, 0, 1)
+    const radius = Math.hypot(...request.focus.size) / 2
+    const distance = Math.max(45, radius * 2.8)
+    scene.camera.position.copy(center).addScaledVector(direction, distance)
+    scene.camera.lookAt(center)
+    if (orbit) {
+      orbit.target.copy(center)
+      orbit.update()
+    }
+    scene.camera.updateMatrixWorld()
+    scene.invalidate()
+    return () => {
+      scene.camera.position.copy(previousPosition)
+      scene.camera.quaternion.copy(previousQuaternion)
+      if (orbit && previousTarget) {
+        orbit.target.copy(previousTarget)
+        orbit.update()
+      }
+      scene.camera.updateMatrixWorld()
+      scene.invalidate()
+    }
+  }, [request, scene])
+
+  return null
+}
+
+function InspectionFocusOverlay() {
+  const focus = useEditor((state) => state.inspectionFocus)
+  const panel = useEditor((state) =>
+    focus
+      ? state.panels.find((candidate) => candidate.id === focus.panelId)
+      : undefined,
+  )
+
+  if (!focus || !panel) return null
+  return (
+    <>
+      <InspectionCameraFocus
+        key={focus.requestId}
+        focus={focus}
+        panel={panel}
+      />
+      <group position={panel.position} rotation={panel.rotation}>
+        <mesh position={focus.center} renderOrder={1000}>
+          <boxGeometry args={focus.size} />
+          <meshBasicMaterial
+            color="#67d7ff"
+            transparent
+            opacity={0.32}
+            depthTest={false}
+            depthWrite={false}
+          />
+          <Edges color="#b8efff" lineWidth={3} />
+        </mesh>
+      </group>
+    </>
+  )
 }
 
 function AlignmentGuides({ guides }: { guides: AlignmentGuide[] }) {
@@ -1510,6 +1657,7 @@ export function Viewport() {
           scaleStep={scaleStep}
           onGuidesChange={setAlignmentGuides}
         />
+        <InspectionFocusOverlay />
         <JointPreviewOverlay />
         <AlignmentGuides guides={alignmentGuides} />
         <Grid
@@ -1566,6 +1714,7 @@ export {
   ContourEditorOverlay,
   EditorReliefHole,
   ExtrudedTextContour,
+  InspectionFocusOverlay,
   JointPreviewOverlay,
   PreviewShape,
   SideFaceTarget,

@@ -21,7 +21,11 @@ import {
   type SocketPattern,
 } from '../model/box'
 import { bundledFontFamily, missingFontFamilies } from '../model/fonts'
-import { snapPanelPosition, worldHalfExtents } from '../model/snapping'
+import {
+  snapPanelPosition,
+  snapPanelWithManualCuts,
+  worldHalfExtents,
+} from '../model/snapping'
 import { localAxisForWorld, worldThinAxis } from '../model/orientation'
 import { linkedBooleanToolIds } from '../model/booleanGraph'
 import { buildFingerJoint } from '../model/fingerJoints'
@@ -432,6 +436,13 @@ export type EditorState = {
         color?: string
       }[]
     | null
+  inspectionFocus: {
+    requestId: number
+    sourceId: string
+    panelId: string
+    center: [number, number, number]
+    size: [number, number, number]
+  } | null
   setDimension: (key: keyof BoxDimensions, value: number) => void
   selectPanel: (id: PanelDefinition['id'] | null, additive?: boolean) => void
   selectPanels: (ids: PanelDefinition['id'][], additive?: boolean) => void
@@ -594,6 +605,7 @@ export type EditorState = {
   endTransform: () => void
   setRotationPreview: (preview: EditorState['rotationPreview']) => void
   setJointPreview: (preview: EditorState['jointPreview']) => void
+  setInspectionFocus: (focus: EditorState['inspectionFocus']) => void
   setWorkspace: (workspace: Workspace) => void
   newProject: (template: 'empty' | 'box') => void
   serializeProject: () => string
@@ -1261,7 +1273,9 @@ export const useEditor = create<EditorState>((set) => ({
   canRedo: Boolean(restoredProject?.history.future.length),
   rotationPreview: null,
   jointPreview: null,
+  inspectionFocus: null,
   setJointPreview: (jointPreview) => set({ jointPreview }),
+  setInspectionFocus: (inspectionFocus) => set({ inspectionFocus }),
   setDimension: (key, value) =>
     set((state) => {
       if (key === 'thickness')
@@ -1307,6 +1321,7 @@ export const useEditor = create<EditorState>((set) => ({
           selectedGroupId: null,
           selectedTextId: null,
           contourSelection: null,
+          inspectionFocus: null,
         }
       if (!additive)
         return {
@@ -1317,12 +1332,14 @@ export const useEditor = create<EditorState>((set) => ({
             state.contourSelection?.panelId === id
               ? state.contourSelection
               : null,
+          inspectionFocus: null,
         }
       return {
         selectedPanels: state.selectedPanels.includes(id)
           ? state.selectedPanels.filter((selected) => selected !== id)
           : [...state.selectedPanels, id],
         selectedGroupId: null,
+        inspectionFocus: null,
       }
     }),
   selectPanels: (ids, additive = false) =>
@@ -1337,12 +1354,18 @@ export const useEditor = create<EditorState>((set) => ({
         selectedGroupId: null,
         selectedTextId: null,
         contourSelection: null,
+        inspectionFocus: null,
       }
     }),
   selectLaserText: (id) =>
     set((state) =>
       id && state.laserTexts.some((text) => text.id === id)
-        ? { selectedTextId: id, selectedPanels: [], selectedGroupId: null }
+        ? {
+            selectedTextId: id,
+            selectedPanels: [],
+            selectedGroupId: null,
+            inspectionFocus: null,
+          }
         : { selectedTextId: null },
     ),
   selectGroup: (id) =>
@@ -1355,8 +1378,14 @@ export const useEditor = create<EditorState>((set) => ({
               state.panels.some((panel) => panel.id === panelId),
             ),
             selectedTextId: null,
+            inspectionFocus: null,
           }
-        : { selectedGroupId: null, selectedPanels: [], selectedTextId: null }
+        : {
+            selectedGroupId: null,
+            selectedPanels: [],
+            selectedTextId: null,
+            inspectionFocus: null,
+          }
     }),
   togglePanelVisibility: (id) =>
     set((state) => ({
@@ -2684,22 +2713,37 @@ export const useEditor = create<EditorState>((set) => ({
       return {
         socketPatterns: updatedPatterns,
         panels: replaceAllSocketPatternCuts(state.panels, updatedPatterns),
+        inspectionFocus: changes.deleted ? null : state.inspectionFocus,
         operationMessage: changes.deleted
           ? 'Verknüpfte Aufnahme deaktiviert.'
           : 'Position in allen verknüpften Reihen aktualisiert.',
       }
     }),
   removeSocketPattern: (patternId) =>
-    set((state) => ({
-      socketPatterns: state.socketPatterns.filter(
-        (pattern) => pattern.id !== patternId,
-      ),
-      panels: state.panels.map((panel) => ({
-        ...panel,
-        cuts: panel.cuts.filter((cut) => cut.socketPatternId !== patternId),
-      })),
-      operationMessage: 'Freie Aufnahmenreihe entfernt.',
-    })),
+    set((state) => {
+      const removedCutIds = new Set(
+        state.panels.flatMap((panel) =>
+          panel.cuts
+            .filter((cut) => cut.socketPatternId === patternId)
+            .map((cut) => cut.id),
+        ),
+      )
+      return {
+        socketPatterns: state.socketPatterns.filter(
+          (pattern) => pattern.id !== patternId,
+        ),
+        panels: state.panels.map((panel) => ({
+          ...panel,
+          cuts: panel.cuts.filter((cut) => cut.socketPatternId !== patternId),
+        })),
+        inspectionFocus:
+          state.inspectionFocus &&
+          removedCutIds.has(state.inspectionFocus.sourceId)
+            ? null
+            : state.inspectionFocus,
+        operationMessage: 'Freie Aufnahmenreihe entfernt.',
+      }
+    }),
   transferSocketPattern: (patternId, targetPanelId, mode) =>
     set((state) => {
       const source = state.socketPatterns.find(
@@ -2768,6 +2812,10 @@ export const useEditor = create<EditorState>((set) => ({
         ),
       })),
       crossJoints: state.crossJoints.filter((joint) => joint.id !== jointId),
+      inspectionFocus:
+        state.inspectionFocus?.sourceId === jointId
+          ? null
+          : state.inspectionFocus,
       operationMessage: 'Steckkreuz entfernt.',
     })),
   removeFingerJoint: (jointId) =>
@@ -2779,6 +2827,10 @@ export const useEditor = create<EditorState>((set) => ({
         ),
       })),
       fingerJoints: state.fingerJoints.filter((joint) => joint.id !== jointId),
+      inspectionFocus:
+        state.inspectionFocus?.sourceId === jointId
+          ? null
+          : state.inspectionFocus,
       operationMessage: 'Fingerverbindung entfernt.',
     })),
   removeFingerJointsFromSelection: () =>
@@ -2809,6 +2861,10 @@ export const useEditor = create<EditorState>((set) => ({
         fingerJoints: state.fingerJoints.filter(
           (joint) => !jointIds.has(joint.id),
         ),
+        inspectionFocus:
+          state.inspectionFocus && jointIds.has(state.inspectionFocus.sourceId)
+            ? null
+            : state.inspectionFocus,
         operationMessage: `${matching.length} Fingerverbindung${matching.length === 1 ? '' : 'en'} entfernt.`,
       }
     }),
@@ -2948,6 +3004,11 @@ export const useEditor = create<EditorState>((set) => ({
         crossJoints: cut?.jointId
           ? state.crossJoints.filter((joint) => joint.id !== cut.jointId)
           : state.crossJoints,
+        inspectionFocus:
+          state.inspectionFocus?.sourceId === cutId ||
+          (cut?.jointId && state.inspectionFocus?.sourceId === cut.jointId)
+            ? null
+            : state.inspectionFocus,
         operationMessage: cut?.jointId
           ? 'Gekoppelte Steckverbindung entfernt.'
           : 'Aussparung entfernt.',
@@ -3025,7 +3086,7 @@ export const useEditor = create<EditorState>((set) => ({
         (panel) => panel.id !== id && !linked.has(panel.id) && !panel.hidden,
       )
       const snapped = state.snapEnabled
-        ? snapPanelPosition(moving, position, candidates)
+        ? snapPanelWithManualCuts(moving, position, candidates)
         : position
       const delta: [number, number, number] = snapped.map(
         (value, axis) => value - moving.position[axis],
@@ -3285,6 +3346,8 @@ export const useEditor = create<EditorState>((set) => ({
     historyRestoring = false
   },
   beginTransform: () => {
+    if (useEditor.getState().inspectionFocus)
+      useEditor.setState({ inspectionFocus: null })
     if (!transformSnapshot) transformSnapshot = snapshotOf(useEditor.getState())
   },
   endTransform: () => {
@@ -3343,6 +3406,7 @@ export const useEditor = create<EditorState>((set) => ({
       canRedo: false,
       rotationPreview: null,
       jointPreview: null,
+      inspectionFocus: null,
     })
     historyRestoring = false
     clearEvaluatedGeometryCache()
@@ -3454,6 +3518,7 @@ export const useEditor = create<EditorState>((set) => ({
           ? `Projekt geladen; ${missingFonts.length} Schriftart(en) fehlen.`
           : 'Projektdatei erfolgreich geladen; Bibliothek wurde zusammengeführt.',
         rotationPreview: null,
+        inspectionFocus: null,
         selectedTextId: null,
         missingFonts,
         isDirty: false,
@@ -3538,6 +3603,8 @@ export const useEditor = create<EditorState>((set) => ({
         ...laser,
         id: operationId('laser'),
         powerWatts: Math.max(1, laser.powerWatts),
+        bedWidth: Math.max(1, laser.bedWidth ?? 400),
+        bedHeight: Math.max(1, laser.bedHeight ?? 400),
       }
       const presets = createDefaultLaserPresets([created], state.materials)
       return {
@@ -3558,6 +3625,14 @@ export const useEditor = create<EditorState>((set) => ({
                 changes.powerWatts === undefined
                   ? laser.powerWatts
                   : Math.max(1, changes.powerWatts),
+              bedWidth:
+                changes.bedWidth === undefined
+                  ? (laser.bedWidth ?? 400)
+                  : Math.max(1, changes.bedWidth),
+              bedHeight:
+                changes.bedHeight === undefined
+                  ? (laser.bedHeight ?? 400)
+                  : Math.max(1, changes.bedHeight),
             }
           : laser,
       ),

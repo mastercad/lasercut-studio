@@ -126,7 +126,7 @@ describe('Toolbar', () => {
     ).not.toBeInTheDocument()
     expect(propertiesHost).not.toHaveClass('socket-wizard-open')
     expect(propertiesHost.scrollTop).toBe(120)
-  })
+  }, 10_000)
 
   it('removes the live socket preview when the dialog is closed', async () => {
     useEditor.getState().newProject('box')

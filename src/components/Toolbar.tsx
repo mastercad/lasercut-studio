@@ -24,6 +24,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { SvgImportDialog } from './SvgImportDialog'
 import { NewProjectDialog } from './NewProjectDialog'
 import { SocketPatternDialog } from './SocketPatternDialog'
+import { BrandMark } from './BrandMark'
 
 const ToolButton = ({
   children,
@@ -214,7 +215,7 @@ export function Toolbar() {
       />
       <header className="toolbar">
         <div className="brand">
-          <div className="brand-mark">LC</div>
+          <BrandMark className="brand-mark" />
           <span>LaserCut Studio{isDirty ? ' *' : ''}</span>
         </div>
         <div className="toolbar-group">

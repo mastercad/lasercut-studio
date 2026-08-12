@@ -378,7 +378,7 @@ export function ExportWorkspace() {
           </span>
         </div>
       )}
-      {jobs.map(({ material, steps }) => {
+      {jobs.map(({ material, steps, sheetCount }) => {
         const materialPanels = scopedPanels.filter(
           (panel) => !panel.hidden && panel.materialId === material.id,
         )
@@ -399,8 +399,9 @@ export function ExportWorkspace() {
                 </h3>
                 <p>
                   {materialPanels.length} Bauteil
-                  {materialPanels.length === 1 ? '' : 'e'} · {steps.length}{' '}
-                  tatsächliche Bearbeitungsschritte
+                  {materialPanels.length === 1 ? '' : 'e'} · {sheetCount ?? 1}{' '}
+                  {(sheetCount ?? 1) === 1 ? 'Blatt' : 'Blätter'} ·{' '}
+                  {steps.length} tatsächliche Bearbeitungsschritte
                 </p>
               </div>
             </header>

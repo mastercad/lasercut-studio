@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { createBoxPanels, type PanelDefinition } from './box'
-import { buildFingerJoint, fitClearance } from './fingerJoints'
+import {
+  buildFingerJoint,
+  fitClearance,
+  fittedCornerSegmentCount,
+} from './fingerJoints'
 import { createPanelGeometry } from './panelGeometry'
 
 const options = {
@@ -56,6 +60,64 @@ describe('finger joints', () => {
         }
       }
     }
+  })
+
+  it('always leaves a finger at both ends of a corner connection', () => {
+    const panels = createBoxPanels({
+      width: 80,
+      height: 100,
+      depth: 50,
+      thickness: 3,
+      fingerWidth: 12,
+    })
+    const first = panels.find((panel) => panel.id === 'front')!
+    const second = panels.find((panel) => panel.id === 'left')!
+    const result = buildFingerJoint(first, second, options, 'closed-ends')
+    expect('error' in result).toBe(false)
+    if ('error' in result) return
+
+    const firstSegments = result.firstFeatures.filter(
+      (feature) => feature.shape === 'box',
+    )
+    expect(firstSegments).toHaveLength(9)
+    expect(firstSegments[0].operation).toBe('add')
+    expect(firstSegments.at(-1)?.operation).toBe('add')
+    expect(firstSegments.map((feature) => feature.operation)).toEqual(
+      firstSegments.map((_, index) => (index % 2 === 0 ? 'add' : 'subtract')),
+    )
+  })
+
+  it('chooses the closest odd segment count and handles invalid inputs safely', () => {
+    expect(fittedCornerSegmentCount(100, 12)).toBe(9)
+    // 120 / 12 would previously produce ten segments and an open end.
+    expect(fittedCornerSegmentCount(120, 12)).toBe(11)
+    expect(fittedCornerSegmentCount(13, 12)).toBe(1)
+    expect(fittedCornerSegmentCount(100, 0)).toBe(0)
+    expect(fittedCornerSegmentCount(100, Number.NaN)).toBe(0)
+    expect(fittedCornerSegmentCount(0, 12)).toBe(0)
+    expect(fittedCornerSegmentCount(Number.NaN, 12)).toBe(0)
+  })
+
+  it.each([
+    [{ ...options, fingerWidth: 0 }, 'Fingerbreite'],
+    [{ ...options, fingerWidth: Number.NaN }, 'Fingerbreite'],
+    [{ ...options, clearance: Number.POSITIVE_INFINITY }, 'Spiel'],
+    [{ ...options, reliefDiameter: -1 }, 'Fräserdurchmesser'],
+  ])('rejects invalid joint options %#', (invalidOptions, message) => {
+    const panels = createBoxPanels({
+      width: 80,
+      height: 100,
+      depth: 50,
+      thickness: 3,
+      fingerWidth: 12,
+    })
+    const result = buildFingerJoint(
+      panels.find((panel) => panel.id === 'front')!,
+      panels.find((panel) => panel.id === 'left')!,
+      invalidOptions,
+      'invalid',
+    )
+    expect(result).toEqual({ error: expect.stringContaining(message) })
   })
 
   it('creates tabs on the first plate and internal slots on the second for a T-joint', () => {
